@@ -24,7 +24,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 import pandas as pd
 
-from src import batch, config, matcher
+from src import config, matcher
 from src import exporter
 from src import pipeline
 from src import preprocessor as pp
@@ -244,74 +244,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="中低匹配分界线，默认 70（范围 50–80）")
     g.add_argument("--floor", type=float, default=60.0,
                    help="匹配识别下限，低于此分判为独有，默认 60")
-
-    b = parser.add_argument_group("批量模式（第五阶段）")
-    b.add_argument("--batch", action="store_true",
-                   help="批量模式：处理多个文件或整个文件夹（自动识别 A/B 并配对）")
-    b.add_argument("--input", nargs="*", default=None, metavar="PATH",
-                   help="批量模式的输入：若干 Excel 文件或文件夹，默认整个考题数据目录")
     return parser.parse_args(argv)
-
-
-def print_batch_summary(outcome: batch.BatchOutcome) -> None:
-    """批量模式的控制台汇总。"""
-    banner("批量处理完成")
-    print(f"  任务数      : {len(outcome.pairs) + len(outcome.failures)}"
-          f"（成功 {outcome.n_ok}，失败 {len(outcome.failures)}）")
-    print(f"  总耗时      : {outcome.elapsed:.2f} 秒")
-    print(f"  记录合计    : A {outcome.total_a} 行 × B {outcome.total_b} 行")
-
-    section("各任务明细")
-    header = f"    {'#':>2}  {'A系统文件':<32} {'B系统文件':<32} {'A':>4} {'B':>4} {'命中':>4}"
-    print(header)
-    print("    " + "-" * (len(header) - 4))
-    for i, (job, res) in enumerate(outcome.pairs, start=1):
-        print(f"    {i:>2}  {job.a_file.name[:30]:<32} {job.b_file.name[:30]:<32} "
-              f"{len(res.df_a):>4} {len(res.df_b):>4} {len(res.frame):>4}")
-
-    if outcome.failures:
-        section("失败任务")
-        for job, msg in outcome.failures:
-            print(f"    {job}\n      → {msg}")
-
-    if outcome.overview_path:
-        print()
-        print(f"  批量汇总已生成至 {outcome.overview_path}")
-
-
-def run_batch_mode(args: argparse.Namespace,
-                   thresholds: matcher.Thresholds) -> int:
-    """批量模式入口：处理多个文件或整个文件夹。"""
-    inputs = args.input or [config.DATA_DIR]
-    if args.no_progress:
-        matcher.tqdm = None
-
-    try:
-        jobs = batch.plan_jobs(inputs)
-    except ValueError as exc:
-        print(f"\n[配对失败] {exc}\n", file=sys.stderr)
-        return 1
-
-    banner("批量模式 · 任务规划")
-    for i, j in enumerate(jobs, start=1):
-        print(f"  {i:>2}. [{batch.detect_role(j.a_file)}] {j.a_file.name}")
-        print(f"      × [{batch.detect_role(j.b_file)}] {j.b_file.name}")
-
-    if args.no_export:
-        print("\n[i] --no-export：已跳过 Excel 导出。")
-        return 0
-
-    try:
-        outcome = batch.run_batch(
-            inputs, thresholds, team=args.team, out_dir=args.out_dir,
-            workers=args.workers, log=console_log,
-        )
-    except Exception as exc:                      # noqa: BLE001
-        print(f"\n[批量失败] {type(exc).__name__}: {exc}", file=sys.stderr)
-        return 2
-
-    print_batch_summary(outcome)
-    return 0 if not outcome.failures else 3
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -324,10 +257,6 @@ def main(argv: list[str] | None = None) -> int:
     thresholds = matcher.Thresholds(
         high=float(args.high), low=float(args.low), floor=float(args.floor)
     )
-
-    # ---------------- 批量模式（第五阶段） ----------------
-    if args.batch:
-        return run_batch_mode(args, thresholds)
 
     print_sheet_inventory()
 

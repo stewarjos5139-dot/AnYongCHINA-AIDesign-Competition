@@ -43,7 +43,7 @@ DATA_DIR = BASE_DIR / "团体赛赛道考题"
 ENTRY = BASE_DIR / "gui_app.py"
 DIST_DIR = BASE_DIR / "dist"
 BUILD_DIR = BASE_DIR / "build"
-DEFAULT_NAME = "Topic03模糊匹配工具"
+DEFAULT_NAME = "多源运营数据相似度模糊匹配工具"
 
 # 明确排除的重型依赖（本项目一条都用不到）
 EXCLUDES = (
@@ -161,15 +161,14 @@ def stage_assets(target: Path, onefile: bool) -> None:
         readme.write_text(
             "Topic03 多源运营数据模糊匹配工具\n"
             "=====================================\n\n"
-            "1. 双击本目录下的 Topic03模糊匹配工具.exe 启动桌面程序。\n"
+            "1. 双击本目录下的「多源运营数据相似度模糊匹配工具.exe」启动桌面程序。\n"
             "2. 分别点「A 系统」「B 系统」两行的「选择…」按钮，各选一个 Excel 文件。\n"
             "3. 需要换数据时，把新的 Excel 放进本目录的「团体赛赛道考题」文件夹，\n"
             "   或直接在界面里选择任意位置的文件，无需重新打包。\n"
             "4. 成果报表默认输出到本目录下的 output\\ 文件夹。\n\n"
-            "命令行用法（可选，支持多文件批量）：\n"
-            "  Topic03模糊匹配工具.exe --selftest        离屏自检\n"
-            "  python main.py                             命令行全流程\n"
-            "  python main.py --batch --input <文件夹>    批量处理多个文件\n",
+            "命令行用法（可选）：\n"
+            "  多源运营数据相似度模糊匹配工具.exe --selftest   离屏自检\n"
+            "  python main.py                             命令行全流程\n",
             encoding="utf-8",
         )
         print(f"  ✓ 已生成使用说明：{readme}")
@@ -210,7 +209,8 @@ def verify(target: Path) -> bool:
 # --------------------------------------------------------------------------- #
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="打包 Topic03 模糊匹配工具为 exe")
-    parser.add_argument("--name", default=DEFAULT_NAME, help=f"可执行文件名（默认 {DEFAULT_NAME}）")
+    parser.add_argument("--name", default=DEFAULT_NAME,
+                        help=f"可执行文件名（默认 {DEFAULT_NAME}）")
     parser.add_argument("--onedir", action="store_true",
                         help="目录模式（启动更快、体积更小；默认为单文件）")
     parser.add_argument("--console", action="store_true",

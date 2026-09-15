@@ -30,6 +30,11 @@ _selftest.log
 output/
 !output/.gitkeep
 
+# ---------- 提交归档包 ----------
+# 由 pack_submission.py 生成，内含 80MB 的 exe，不入库
+提交包/
+Topic03_模糊匹配_*.zip
+
 # ---------- 测试与覆盖率 ----------
 .pytest_cache/
 .coverage
