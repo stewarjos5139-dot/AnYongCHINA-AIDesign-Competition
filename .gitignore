@@ -1,0 +1,55 @@
+# ============================================================
+#  Topic03 多源运营数据模糊匹配工具
+#  只跟踪：源码 / 依赖清单 / 打包脚本 / 考题数据
+#  以下全部为生成物或本机环境产物，不入库
+# ============================================================
+
+# ---------- Python 运行环境 ----------
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+.python-version
+
+# ---------- Python 编译缓存 ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# ---------- PyInstaller 打包产物 ----------
+# 注意：build/ 是工作目录（98MB），build.bat / build_exe.py 是源码，不能一起忽略
+build/
+dist/
+*.manifest
+_selftest.log
+
+# ---------- 程序生成的成果文件 ----------
+# 成果报表由工具运行时产出，目录保留结构但不入库
+output/
+!output/.gitkeep
+
+# ---------- 测试与覆盖率 ----------
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ---------- 编辑器 / IDE ----------
+.idea/
+.vscode/
+.claude/
+
+# ---------- 操作系统 ----------
+Thumbs.db
+desktop.ini
+.DS_Store
+*~
+
+# ---------- 临时文件 ----------
+*.tmp
+*.bak
+*.log
+~$*.xlsx

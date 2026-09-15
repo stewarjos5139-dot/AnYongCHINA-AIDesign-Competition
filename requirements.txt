@@ -1,0 +1,15 @@
+# Topic03 多源运营数据"相似度"模糊匹配工具 —— 依赖清单
+# 安装：python -m pip install -r requirements.txt
+
+# ---- 核心计算（第一阶段起必需） ----
+pandas>=2.0
+openpyxl>=3.1
+rapidfuzz>=3.0
+tqdm>=4.66              # 进度条（可选依赖，缺失时自动退化为无进度条运行）
+
+# ---- 桌面 GUI（第四/五阶段加分项；仅 gui_app.py 需要） ----
+PyQt6>=6.5
+matplotlib>=3.7
+
+# ---- 打包为 exe（仅 build_exe.py / build.bat 需要） ----
+pyinstaller>=6.0
