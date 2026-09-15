@@ -28,10 +28,7 @@ from __future__ import annotations
 import argparse
 import sys
 import traceback
-
-import pandas as pd
 from pathlib import Path
-from typing import Any, Iterable
 
 # --------------------------------------------------------------------------- #
 #  PyQt6 / PyQt5 兼容导入
@@ -40,11 +37,10 @@ try:
     from PyQt6.QtCore import Qt, QThread, pyqtSignal
     from PyQt6.QtGui import QColor, QFont
     from PyQt6.QtWidgets import (
-        QAbstractItemView, QApplication, QFileDialog, QGridLayout, QGroupBox,
-        QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-        QMainWindow, QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSpinBox,
-        QSplitter, QStatusBar, QTabWidget, QTableWidget, QTableWidgetItem,
-        QTextEdit, QVBoxLayout, QWidget,
+        QApplication, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout,
+        QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QProgressBar,
+        QPushButton, QSizePolicy, QSpinBox, QSplitter, QStatusBar, QTabWidget,
+        QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
     )
 
     QT6 = True
@@ -52,11 +48,10 @@ except ImportError:                                     # pragma: no cover
     from PyQt5.QtCore import Qt, QThread, pyqtSignal  # type: ignore
     from PyQt5.QtGui import QColor, QFont             # type: ignore
     from PyQt5.QtWidgets import (                     # type: ignore
-        QAbstractItemView, QApplication, QFileDialog, QGridLayout, QGroupBox,
-        QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-        QMainWindow, QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSpinBox,
-        QSplitter, QStatusBar, QTabWidget, QTableWidget, QTableWidgetItem,
-        QTextEdit, QVBoxLayout, QWidget,
+        QApplication, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout,
+        QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QProgressBar,
+        QPushButton, QSizePolicy, QSpinBox, QSplitter, QStatusBar, QTabWidget,
+        QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
     )
 
     QT6 = False
@@ -77,7 +72,6 @@ matplotlib.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu S
 matplotlib.rcParams["axes.unicode_minus"] = False                 # 负号正常显示
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from src import batch as batch_mod     # noqa: E402
 from src import config as C            # noqa: E402
 from src import matcher, pipeline      # noqa: E402
 
@@ -100,23 +94,19 @@ _ALIGN_LEFT = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter if QT6 
     else Qt.AlignLeft | Qt.AlignVCenter
 _TABLE_STRETCH = QHeaderView.ResizeMode.Stretch if QT6 else QHeaderView.Stretch
 _TABLE_FIXED = QHeaderView.ResizeMode.Interactive if QT6 else QHeaderView.Interactive
-_SELECT_MULTI = QAbstractItemView.SelectionMode.ExtendedSelection if QT6 \
-    else QAbstractItemView.ExtendedSelection
-_ROLE_DATA_ROLE = Qt.ItemDataRole.UserRole if QT6 else Qt.UserRole
-_PATH_DATA_ROLE = _ROLE_DATA_ROLE + 1
 
 
 # =========================================================================== #
 #  后台工作线程
 # =========================================================================== #
 class MatchWorker(QThread):
-    """把整条批量流水线放到子线程执行，通过信号回主线程。
+    """把整条流水线放到子线程执行，通过信号回主线程。
 
     信号
     ----
     progress(int, str)  整体进度 0–100 与当前阶段文字
     log(str)            一行运行日志
-    succeeded(object)   成功，负载是 ``batch.BatchOutcome``
+    succeeded(object)   成功，负载是 ``pipeline.PipelineResult``
     failed(str)         失败，负载是格式化后的异常信息
     """
 
@@ -127,14 +117,16 @@ class MatchWorker(QThread):
 
     def __init__(
         self,
-        inputs: list[str],
+        a_file: str,
+        b_file: str,
         thresholds: matcher.Thresholds,
         team: str,
         out_dir: str | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self._inputs = list(inputs)
+        self._a_file = a_file
+        self._b_file = b_file
         self._thresholds = thresholds
         self._team = team
         self._out_dir = out_dir
@@ -142,9 +134,10 @@ class MatchWorker(QThread):
     # 子线程体：绝不触碰任何界面元件
     def run(self) -> None:                              # noqa: D102
         try:
-            outcome = batch_mod.run_batch(
-                self._inputs,
-                self._thresholds,
+            result = pipeline.run_pipeline(
+                a_file=self._a_file,
+                b_file=self._b_file,
+                thresholds=self._thresholds,
                 team=self._team,
                 out_dir=self._out_dir,
                 progress=lambda pct, msg: self.progress.emit(int(pct), msg),
@@ -156,7 +149,7 @@ class MatchWorker(QThread):
             ).strip()
             self.failed.emit(detail)
             return
-        self.succeeded.emit(outcome)
+        self.succeeded.emit(result)
 
 
 # =========================================================================== #
@@ -243,7 +236,7 @@ class MainWindow(QMainWindow):
         self.resize(1360, 860)
 
         self._worker: MatchWorker | None = None       # 必须持引用，否则线程会被 GC
-        self._result: Any = None            # batch.BatchOutcome（运行后填充）
+        self._result: pipeline.PipelineResult | None = None
         self._default_team = C.DEFAULT_TEAM
 
         central = QWidget()
@@ -274,40 +267,32 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(10)
 
-        # --- 数据源（支持多选文件 / 整个文件夹） ---
-        src_box = QGroupBox("① 数据源（可多选文件，或直接选文件夹）")
-        sl = QVBoxLayout(src_box)
+        # --- 数据源：A / B 各一个文件，两个按钮分别选择 ---
+        src_box = QGroupBox("① 数据源")
+        grid = QGridLayout(src_box)
+        grid.setColumnStretch(1, 1)
 
-        self.file_list = QListWidget()
-        self.file_list.setSelectionMode(_SELECT_MULTI)
-        self.file_list.setMinimumHeight(118)
-        self.file_list.setToolTip(
-            "自动识别每个文件属于 A 系统（ERP 客户明细）还是 B 系统（银行流水）。\n"
-            "识别依据：Sheet 名 → 列名 → 文件名，三级特征依次尝试。"
-        )
+        self.edit_a = QLineEdit(str(C.A_FILE))
+        self.edit_b = QLineEdit(str(C.B_FILE))
+        for row, (label, edit, tip) in enumerate((
+            ("A 系统（ERP 客户明细）", self.edit_a, "核心对比列：客户名称"),
+            ("B 系统（银行流水）", self.edit_b, "核心对比列：对方户名"),
+        )):
+            edit.setReadOnly(True)
+            edit.setToolTip(f"{tip}\n{edit.text()}")
+            btn = QPushButton("选择…")
+            btn.setFixedWidth(76)
+            btn.clicked.connect(lambda _, e=edit: self._pick_file(e))
+            grid.addWidget(QLabel(label), row, 0)
+            grid.addWidget(edit, row, 1)
+            grid.addWidget(btn, row, 2)
 
-        row = QHBoxLayout()
-        for text, slot in (
-            ("选择文件…", self._pick_files),
-            ("选择文件夹…", self._pick_folder),
-            ("移除选中", self._remove_selected),
-            ("恢复默认", self._reset_files),
-        ):
-            btn = QPushButton(text)
-            btn.clicked.connect(slot)
-            row.addWidget(btn)
-        sl.addLayout(row)
-        sl.addWidget(self.file_list)
-
-        self.lbl_detect = QLabel("")
-        self.lbl_detect.setWordWrap(True)
-        self.lbl_detect.setStyleSheet("color:#44546A;font-size:11px;")
-        sl.addWidget(self.lbl_detect)
-
+        reset = QPushButton("恢复默认考题文件")
+        reset.clicked.connect(self._reset_files)
+        grid.addWidget(reset, 2, 1, 1, 2)
         lay.addWidget(src_box)
 
-        # 注意：初始文件在 __init__ 里等右侧面板建好后再填，
-        # 因为 _add_paths 会往日志框写一行。
+        # 注意：初始路径在 __init__ 里等右侧面板建好后再填（日志框要用）。
 
         # --- 阈值 ---
         thr_box = QGroupBox("② 匹配阈值（可调 · 加分项）")
@@ -430,95 +415,29 @@ class MainWindow(QMainWindow):
         return tabs
 
     # ================================================================= 交互
-    def _add_paths(self, paths: Iterable[str]) -> None:
-        """把文件加进列表（自动去重），并刷新 A/B 识别提示。"""
-        existing = {self.file_list.item(i).text() for i in range(self.file_list.count())}
-        added, unknown = 0, []
-        for raw in paths:
-            p = Path(raw)
-            if p.is_dir():
-                # 文件夹展开成其中的 Excel（与 batch.expand_inputs 同一套规则）
-                for f in batch_mod.expand_inputs([p]):
-                    if str(f) not in existing:
-                        existing.add(str(f))
-                        self._add_item(f)
-                        added += 1
-                continue
-            if str(p) not in existing:
-                existing.add(str(p))
-                self._add_item(p)
-                added += 1
-        if added:
-            self.log_box.append(f"[选择] 新增 {added} 个文件")
-        self._refresh_detection()
-
-    def _add_item(self, path: Path) -> None:
-        role = batch_mod.detect_role(path)
-        tag = f"[{role}]" if role else "[?]"
-        item = QListWidgetItem(f"{tag}  {path.name}")
-        item.setToolTip(str(path))
-        item.setData(_ROLE_DATA_ROLE, role or "")
-        item.setData(_PATH_DATA_ROLE, str(path))          # 完整路径，供后续读取
-        item.setForeground(QColor("#C00000" if role is None else "#000000"))
-        self.file_list.addItem(item)
-
-    def _refresh_detection(self) -> None:
-        """刷新底部提示：识别到几个 A、几个 B，并预览配对结果。"""
-        paths = self.selected_paths()
-        if not paths:
-            self.lbl_detect.setText("未选择文件。")
-            return
-        n_a = sum(1 for p in paths if batch_mod.detect_role(p) == batch_mod.ROLE_A)
-        n_b = sum(1 for p in paths if batch_mod.detect_role(p) == batch_mod.ROLE_B)
-        try:
-            jobs = batch_mod.plan_jobs(paths)
-        except ValueError as exc:
-            self.lbl_detect.setText(f"⚠ {str(exc).splitlines()[0]}")
-            return
-        txt = f"识别到 A 系统 {n_a} 个 · B 系统 {n_b} 个 → 将执行 {len(jobs)} 个配对任务"
-        if len(jobs) > 1:
-            txt += "（完成后额外生成《批量汇总》）"
-        self.lbl_detect.setText(txt)
-
-    def selected_paths(self) -> list[str]:
-        """列表里全部文件的**完整路径**（不是显示名）。"""
-        out: list[str] = []
-        for i in range(self.file_list.count()):
-            item = self.file_list.item(i)
-            stored = item.data(_PATH_DATA_ROLE)
-            out.append(stored if stored else item.text())
-        return out
-
-    def _pick_files(self) -> None:
-        paths, _ = QFileDialog.getOpenFileNames(
-            self, "选择 Excel 数据文件（可按住 Ctrl / Shift 多选）",
-            str(C.DATA_DIR),
+    def _pick_file(self, target: QLineEdit) -> None:
+        """为 A 或 B 选择**单个** Excel 文件。"""
+        start = Path(target.text()).parent if target.text() else C.DATA_DIR
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择 Excel 数据文件", str(start),
             "Excel 工作簿 (*.xlsx *.xlsm *.xls);;所有文件 (*)",
         )
-        if paths:
-            self._add_paths(paths)
-
-    def _pick_folder(self) -> None:
-        folder = QFileDialog.getExistingDirectory(
-            self, "选择包含多个 Excel 的文件夹", str(C.DATA_DIR)
-        )
-        if not folder:
+        if not path:
             return
-        found = batch_mod.expand_inputs([folder])
-        if not found:
-            self._warn(f"该文件夹下没有 Excel 文件：\n{folder}")
-            return
-        self._add_paths([str(f) for f in found])
-
-    def _remove_selected(self) -> None:
-        for item in self.file_list.selectedItems():
-            self.file_list.takeItem(self.file_list.row(item))
-        self._refresh_detection()
+        target.setText(path)
+        target.setToolTip(path)
+        self.log_box.append(f"[选择] {path}")
 
     def _reset_files(self) -> None:
-        self.file_list.clear()
-        self._add_paths([str(C.A_FILE), str(C.B_FILE)])
+        self.edit_a.setText(str(C.A_FILE))
+        self.edit_b.setText(str(C.B_FILE))
+        if hasattr(self, "log_box"):
+            self.log_box.append(f"[选择] 已恢复默认考题文件")
         self.statusBar().showMessage("已恢复为考题默认文件")
+
+    def inputs(self) -> list[str]:
+        """当前选定的两个文件路径 ``[A, B]``。"""
+        return [self.edit_a.text().strip(), self.edit_b.text().strip()]
 
     def _thresholds(self) -> matcher.Thresholds:
         """从界面读取阈值；``Thresholds`` 自身会校验顺序合法性。"""
@@ -533,19 +452,18 @@ class MainWindow(QMainWindow):
         if self._worker is not None and self._worker.isRunning():
             return
 
-        paths = self.selected_paths()
-        if not paths:
-            self._warn("请先选择至少一个 Excel 文件（或直接选一个文件夹）。")
+        a_file, b_file = self.inputs()
+        for label, path in (("A 系统", a_file), ("B 系统", b_file)):
+            if not path:
+                self._warn(f"请先选择{label}的数据文件。")
+                return
+            if not Path(path).exists():
+                self._warn(f"{label}文件不存在：\n{path}")
+                return
+        if a_file == b_file:
+            self._warn("A 系统与 B 系统选了同一个文件，请分别选择。")
             return
-        missing = [p for p in paths if not Path(p).exists()]
-        if missing:
-            self._warn("以下文件不存在：\n" + "\n".join(missing[:5]))
-            return
-        try:
-            batch_mod.plan_jobs(paths)               # 提前校验能否配对
-        except ValueError as exc:
-            self._warn(f"无法开始匹配：\n\n{exc}")
-            return
+
         try:
             thresholds = self._thresholds()
         except ValueError as exc:
@@ -561,7 +479,8 @@ class MainWindow(QMainWindow):
         self.btn_run.setEnabled(False)
         self.btn_export.setEnabled(False)
 
-        self._worker = MatchWorker(paths, thresholds, self._default_team, None, self)
+        self._worker = MatchWorker(a_file, b_file, thresholds,
+                                   self._default_team, None, self)
         self._worker.progress.connect(self._on_progress)
         self._worker.log.connect(self._on_log)
         self._worker.succeeded.connect(self._on_success)
@@ -581,67 +500,34 @@ class MainWindow(QMainWindow):
             self.log_box.verticalScrollBar().maximum()
         )
 
-    def _on_success(self, outcome) -> None:
-        """槽：主线程收到批量结果 → 刷新界面 → 弹提示框。"""
-        self._apply_result(outcome)
+    def _on_success(self, result: pipeline.PipelineResult) -> None:
+        """槽：主线程收到匹配结果 → 刷新界面 → 弹提示框。"""
+        self._apply_result(result)
 
-        lines = [
-            f"匹配已完成，用时 {outcome.elapsed:.2f} 秒。",
-            f"阈值：{outcome.pairs[0][1].thresholds.label}"
-            f"（完全 / 高度 / 中低 / 识别下限）",
-            "",
-            f"任务：成功 {outcome.n_ok} 个"
-            + (f"，失败 {len(outcome.failures)} 个" if outcome.failures else ""),
-            f"记录：A {outcome.total_a} 行 × B {outcome.total_b} 行",
-            "",
-            "分档结果：",
-        ]
-        lines += [f"    {k:<10} {v:>4} 条" for k, v in self._aggregate_counts().items()]
-        lines += ["", "已生成的成果文件："]
-        for _, res in outcome.pairs:
-            if res.path:
-                lines.append(f"    {res.path.name}")
-        if outcome.overview_path:
-            lines.append(f"    {outcome.overview_path.name}（批量汇总）")
-        lines += ["", "可点击「导出完整报表…」另存到指定位置。"]
-        QMessageBox.information(self, "匹配完成", "\n".join(lines))
+        counts = result.counts
+        body = "\n".join(f"    {k:<14} {v:>4} 行" for k, v in result.sheets.items())
+        QMessageBox.information(
+            self, "匹配完成",
+            f"匹配已完成，用时 {result.elapsed:.2f} 秒。\n\n"
+            f"阈值：{result.thresholds.label}\n"
+            f"（完全 / 高度 / 中低 / 识别下限）\n\n"
+            "分档结果：\n"
+            + "\n".join(f"    {k:<10} {v:>4} 条" for k, v in counts.items())
+            + f"\n\n成果报表各 Sheet 行数：\n{body}\n\n"
+            f"已自动保存至：\n{result.path}\n\n"
+            "可点击「导出完整报表…」另存到指定位置。",
+        )
 
-    def _aggregate_counts(self) -> dict[str, int]:
-        """把各配对的五档计数累加。"""
-        total = {k: 0 for k in ("完全匹配", "高度匹配", "中低匹配",
-                                "低置信度匹配", "A系统独有")}
-        for _, res in self._result.pairs:
-            for k, v in res.counts.items():
-                total[k] = total.get(k, 0) + v
-        return total
-
-    def _combined_frame(self) -> pd.DataFrame:
-        """合并各配对的 Sheet1；多于一个任务时在最前面加「数据来源」列。"""
-        frames = []
-        multi = len(self._result.pairs) > 1
-        for job, res in self._result.pairs:
-            f = res.frame
-            if f is None or f.empty:
-                continue
-            f = f.copy()
-            if multi:
-                f.insert(0, "数据来源", job.a_file.stem[:26])
-            frames.append(f)
-        if not frames:
-            return pd.DataFrame()
-        return pd.concat(frames, ignore_index=True)
-
-    def _apply_result(self, outcome) -> None:
-        """把批量结果填进图表 / 表格 / 摘要（无模态弹窗，便于离屏自检复用）。"""
-        self._result = outcome
+    def _apply_result(self, result: pipeline.PipelineResult) -> None:
+        """把结果填进图表 / 表格 / 摘要（无模态弹窗，便于离屏自检复用）。"""
+        self._result = result
         self.progress.setValue(100)
         self.lbl_stage.setText("✅ 全部完成")
-        self.statusBar().showMessage(f"完成，用时 {outcome.elapsed:.2f} 秒")
+        self.statusBar().showMessage(f"完成，用时 {result.elapsed:.2f} 秒")
 
-        counts = self._aggregate_counts()
-        self.chart.plot(counts, outcome.pairs[0][1].thresholds)
-        self._fill_table()
-        self._fill_summary(counts)
+        self.chart.plot(result.counts, result.thresholds)
+        self._fill_table(result)
+        self._fill_summary(result)
         self.btn_export.setEnabled(True)
         self.tabs.setCurrentIndex(0)
 
@@ -653,86 +539,68 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "运行失败", detail)
 
     # ------------------------------------------------------------ 结果填充
-    def _fill_table(self) -> None:
-        frame = self._combined_frame()
-        batch = "数据来源" in frame.columns
-        headers = ["数据来源", "A系统-客户名称", "B系统-对方户名",
-                   "相似度(%)", "匹配状态", "备注"]
-        if not batch:
-            headers = headers[1:]
-        self.table.setColumnCount(len(headers))
-        self.table.setHorizontalHeaderLabels(headers)
-
-        shown = frame.head(self.PREVIEW_ROWS)
-        self.table.setRowCount(len(shown))
-        for r, (_, row) in enumerate(shown.iterrows()):
+    def _fill_table(self, result: pipeline.PipelineResult) -> None:
+        frame = result.frame.head(self.PREVIEW_ROWS)
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(
+            ["A系统-客户名称", "B系统-对方户名", "相似度(%)", "匹配状态", "备注"]
+        )
+        self.table.setRowCount(len(frame))
+        for r, (_, row) in enumerate(frame.iterrows()):
             status = str(row["匹配状态"])
             bg = C_GREEN if status in ("完全匹配", "高度匹配") else (
                 C_YELLOW if status == "中低匹配" else None
             )
             remark = str(row["备注"])
-            values: list[tuple[str, Any, str | None]] = []
-            if batch:
-                values.append((str(row["数据来源"]), _ALIGN_LEFT, "#44546A"))
-            values += [
+            cells = (
                 (str(row["A系统-客户名称"]), _ALIGN_LEFT, None),
                 (str(row["B系统-对方户名"]), _ALIGN_LEFT, None),
                 (f"{float(row['相似度(%)']):.1f}", _ALIGN_CENTER, None),
                 (status, _ALIGN_CENTER, None),
                 (remark, _ALIGN_LEFT,
                  C_RED if status == "低置信度匹配" else "#7A7A7A"),
-            ]
-            for col, (text, align, fg) in enumerate(values):
+            )
+            for col, (text, align, fg) in enumerate(cells):
                 item = QTableWidgetItem(text)
                 item.setTextAlignment(align)
                 if bg:
                     item.setBackground(QColor(bg))
                 if fg:
                     item.setForeground(QColor(fg))
-                if col == len(values) - 1:
+                if col == 4:
                     item.setToolTip(remark)
                 self.table.setItem(r, col, item)
 
         hh = self.table.horizontalHeader()
-        widths = ([150] if batch else []) + [250, 250, 90, 100]
-        for i, w in enumerate(widths):
+        for i, w in enumerate((250, 250, 90, 100)):
             hh.setSectionResizeMode(i, _TABLE_FIXED)
             self.table.setColumnWidth(i, w)
-        hh.setSectionResizeMode(len(widths), _TABLE_STRETCH)
+        hh.setSectionResizeMode(4, _TABLE_STRETCH)
 
-    def _fill_summary(self, counts: dict[str, int]) -> None:
-        t = self._result.pairs[0][1].thresholds
-        n_a, n_b = self._result.total_a, self._result.total_b
-        b_only = sum(len(res.report["frames"]["sheet3"])
-                     for _, res in self._result.pairs
-                     if res.report and "sheet3" in res.report["frames"])
-        scope = (f"共 {self._result.n_ok} 个配对任务 · A {n_a} 行 · B {n_b} 行"
-                 if self._result.n_ok > 1 else f"A {n_a} 行 · B {n_b} 行")
+    def _fill_summary(self, result: pipeline.PipelineResult) -> None:
+        t = result.thresholds
+        c = result.counts
+        b_only = len(result.report["frames"]["sheet3"]) if result.report else 0
         self.lbl_summary.setText(
-            f"<b>分档结果</b>（{scope}）<br>"
-            f"完全匹配（100%）：<b>{counts['完全匹配']}</b> 条<br>"
-            f"高度匹配（≥{t.high:g}%）：<b>{counts['高度匹配']}</b> 条<br>"
-            f"中低匹配（{t.low:g}–{t.high:g}%）：<b>{counts['中低匹配']}</b> 条<br>"
-            f"低置信度（{t.floor:g}–{t.low:g}%）：<b>{counts['低置信度匹配']}</b> 条<br>"
-            f"A系统独有（<{t.floor:g}%）：<b>{counts['A系统独有']}</b> 条<br>"
+            f"<b>分档结果</b>（A {len(result.df_a)} 行 · B {len(result.df_b)} 行）<br>"
+            f"完全匹配（100%）：<b>{c['完全匹配']}</b> 条<br>"
+            f"高度匹配（≥{t.high:g}%）：<b>{c['高度匹配']}</b> 条<br>"
+            f"中低匹配（{t.low:g}–{t.high:g}%）：<b>{c['中低匹配']}</b> 条<br>"
+            f"低置信度（{t.floor:g}–{t.low:g}%）：<b>{c['低置信度匹配']}</b> 条<br>"
+            f"A系统独有（<{t.floor:g}%）：<b>{c['A系统独有']}</b> 条<br>"
             f"B系统独有：<b>{b_only}</b> 条<br>"
-            f"<span style='color:#7A7A7A'>总耗时 {self._result.elapsed:.2f}s</span>"
+            f"<span style='color:#7A7A7A'>耗时 {result.elapsed:.2f}s ｜ "
+            f"清洗 {result.clean_seconds:.2f}s ｜ 匹配 {result.match_seconds:.2f}s</span>"
         )
 
     # ------------------------------------------------------------ 导出
     def _export_as(self) -> None:
-        if self._result is None or not self._result.pairs:
+        if self._result is None or self._result.report is None:
             return
         from src import exporter
 
-        if self._result.n_ok > 1:
-            self._export_batch(exporter)
-        else:
-            self._export_single(exporter)
-
-    def _export_single(self, exporter) -> None:
-        _, res = self._result.pairs[0]
-        suggestion = str(res.path or exporter.default_filename(self._default_team))
+        suggestion = str(self._result.path
+                         or exporter.default_filename(self._default_team))
         path, _ = QFileDialog.getSaveFileName(
             self, "导出完整报表", suggestion, "Excel 工作簿 (*.xlsx)"
         )
@@ -743,57 +611,20 @@ class MainWindow(QMainWindow):
             target = target.with_suffix(".xlsx")
         try:
             report = exporter.export_report(
-                res.df_a, res.df_b, res.outcome,
+                self._result.df_a, self._result.df_b, self._result.outcome,
                 out_dir=target.parent, filename=target.name,
-                thresholds=res.thresholds,
+                thresholds=self._result.thresholds,
             )
         except PermissionError:
             self._warn(f"无法写入文件（可能正在 Excel 中打开）：\n{target}\n\n"
-                       f"请关闭该文件后重试。")
+                       "请关闭该文件后重试。")
             return
         except Exception as exc:                        # noqa: BLE001
             self._warn(f"导出失败：{type(exc).__name__}: {exc}")
             return
+
         self.log_box.append(f"[导出] 已另存为 {report['path']}")
         QMessageBox.information(self, "导出成功", f"报表已保存至：\n{report['path']}")
-
-    def _export_batch(self, exporter) -> None:
-        """批量另存：选一个目录，把每个配对的成果文件 + 批量汇总全部写过去。"""
-        folder = QFileDialog.getExistingDirectory(
-            self, "选择导出目录（将写入全部成果文件）",
-            str(self._result.pairs[0][1].path.parent if self._result.pairs[0][1].path
-                 else C.OUTPUT_DIR),
-        )
-        if not folder:
-            return
-        out = Path(folder)
-        written: list[str] = []
-        try:
-            for job, res in self._result.pairs:
-                report = exporter.export_report(
-                    res.df_a, res.df_b, res.outcome, out_dir=out,
-                    filename=batch_mod._job_filename(job, self._default_team),
-                    thresholds=res.thresholds,
-                )
-                written.append(report["path"].name)
-            overview = exporter.export_batch_overview(
-                self._result.entries, team=self._default_team, out_dir=out
-            )
-            written.append(overview.name)
-        except PermissionError:
-            self._warn(f"无法写入目录（文件可能正被 Excel 占用）：\n{out}")
-            return
-        except Exception as exc:                        # noqa: BLE001
-            self._warn(f"导出失败：{type(exc).__name__}: {exc}")
-            return
-
-        for name in written:
-            self.log_box.append(f"[导出] {name}")
-        QMessageBox.information(
-            self, "导出成功",
-            f"已导出 {len(written)} 个文件到：\n{out}\n\n"
-            + "\n".join(f"    {n}" for n in written),
-        )
 
     def _warn(self, message: str) -> None:
         QMessageBox.warning(self, "提示", message)
@@ -810,9 +641,10 @@ class MainWindow(QMainWindow):
 #  入口
 # =========================================================================== #
 def selftest() -> int:
-    """离屏自检：装配窗口 → 同步跑一次流水线 → 填充界面，验证无异常。
+    """离屏自检：装配窗口 → 同步跑一次完整流水线 → 填充界面，验证无异常。
 
-    产物写到 ``output/_selftest/``，避免覆盖正式成果文件（也就不会被 Excel 文件锁影响）。
+    产物写到 ``output/_selftest/``，避免覆盖正式成果文件
+    （同时也不会被"文件正开在 Excel 里"的文件锁影响）。
     """
     import os
 
@@ -827,30 +659,31 @@ def selftest() -> int:
     win = MainWindow()
     win.show()
     print("[selftest] 窗口装配成功")
-    print(f"[selftest] 文件列表：{win.file_list.count()} 项 → {win.selected_paths()}")
-    print(f"[selftest] 识别提示：{win.lbl_detect.text()}")
+    a_file, b_file = win.inputs()
+    print(f"[selftest] A 系统：{Path(a_file).name}")
+    print(f"[selftest] B 系统：{Path(b_file).name}")
     print(f"[selftest] 阈值控件：high={win.spin_high.value()} "
           f"low={win.spin_low.value()} floor={win.spin_floor.value()} "
           f"→ {win._thresholds().label}")
 
     out_dir = C.OUTPUT_DIR / "_selftest"
-    result = batch_mod.run_batch(
-        win.selected_paths(), win._thresholds(), out_dir=out_dir,
-        log=lambda t: print(f"[selftest] {t}"),
+    result = pipeline.run_pipeline(
+        a_file=a_file, b_file=b_file, thresholds=win._thresholds(),
+        out_dir=out_dir, log=lambda t: print(f"[selftest] {t}"),
     )
     win._apply_result(result)                          # 不弹模态框，便于离屏运行
     print(f"[selftest] 图表子图数：{len(win.chart.figure.axes)}")
-    print(f"[selftest] 表格行数：{win.table.rowCount()}  列数：{win.table.columnCount()}")
+    print(f"[selftest] 表格 {win.table.rowCount()} 行 × "
+          f"{win.table.columnCount()} 列")
     print(f"[selftest] 导出按钮可用：{win.btn_export.isEnabled()}")
-    print(f"[selftest] 单任务成果：{result.pairs[0][1].path}")
+    print(f"[selftest] 成果文件：{result.path}")
 
     # ---- 真实 QThread 回归：直接驱动 MatchWorker，验证 4 类信号都能发出 ----
     from PyQt6.QtCore import QEventLoop
 
     got: dict[str, object] = {"progress": [], "logs": 0, "ok": None, "err": None}
-    worker = MatchWorker(
-        win.selected_paths(), win._thresholds(), C.DEFAULT_TEAM, str(out_dir)
-    )
+    worker = MatchWorker(a_file, b_file, win._thresholds(), C.DEFAULT_TEAM,
+                         str(out_dir))
     worker.progress.connect(lambda p, m: got["progress"].append(p))
     worker.log.connect(lambda t: got.__setitem__("logs", int(got["logs"]) + 1))
     worker.succeeded.connect(lambda r: got.__setitem__("ok", r))
@@ -870,27 +703,6 @@ def selftest() -> int:
           f"成功率 {got['ok'] is not None}")
     assert got["ok"] is not None, "Worker 未发出 succeeded 信号"
 
-    # ---- 批量场景回归：造 4 个文件（2 A × 2 B），验证配对 + 汇总 + 表格来源列 ----
-    demo_dir = out_dir / "batch_demo"
-    _make_batch_fixture(demo_dir)
-    win.file_list.clear()
-    win._add_paths([str(f) for f in sorted(demo_dir.glob("*.xlsx"))])
-    print(f"[selftest] 批量识别：{win.lbl_detect.text()}")
-
-    b_result = batch_mod.run_batch(
-        win.selected_paths(), win._thresholds(),
-        out_dir=out_dir / "batch_out", log=lambda t: None,
-    )
-    win._apply_result(b_result)
-    app.processEvents()
-    print(f"[selftest] 批量任务数：{b_result.n_ok}  "
-          f"汇总文件：{b_result.overview_path.name if b_result.overview_path else None}")
-    table_headers = [win.table.horizontalHeaderItem(i).text()
-                     for i in range(win.table.columnCount())]
-    print(f"[selftest] 批量表格列：{table_headers}")
-    print(f"[selftest] 批量表格列：{table_headers}")
-    print(f"[selftest] 批量表格行数：{win.table.rowCount()}")
-
     # ---- 截图，便于人工确认界面布局 ----
     win.resize(1360, 860)
     shot = out_dir / "gui_preview.png"
@@ -900,27 +712,6 @@ def selftest() -> int:
 
     print("[selftest] 全部通过 ✅")
     return 0
-
-
-def _make_batch_fixture(demo_dir: Path, when: str = "") -> None:
-    """用考题数据切出两批互不相同的 A/B 文件，作为批量场景的自检素材。"""
-    import shutil
-    from openpyxl import load_workbook  # noqa: F401  （确认依赖可用）
-
-    if demo_dir.exists():
-        shutil.rmtree(demo_dir)
-    demo_dir.mkdir(parents=True, exist_ok=True)
-
-    a = pd.read_excel(C.A_FILE, sheet_name=C.A_SHEET)
-    b = pd.read_excel(C.B_FILE, sheet_name=C.B_SHEET)
-    for tag, sl in (("2023", slice(0, 60)), ("2024", slice(55, None))):
-        for df, sheet, name in (
-            (a, C.A_SHEET, f"客户交易明细_A系统_{tag}.xlsx"),
-            (b, C.B_SHEET, f"银行流水明细_B系统_{tag}.xlsx"),
-        ):
-            sub = df.iloc[sl].reset_index(drop=True)
-            with pd.ExcelWriter(demo_dir / name, engine="openpyxl") as w:
-                sub.to_excel(w, sheet_name=sheet, index=False)
 
 
 def main(argv: list[str] | None = None) -> int:

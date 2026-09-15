@@ -38,18 +38,27 @@ ROLE_B = "B"
 EXCEL_SUFFIXES = (".xlsx", ".xlsm", ".xls")
 
 # 三级识别特征
+#
+# 注意：这些特征必须**足够具体**，否则会误伤。
+# 反面教材：把 "A系统" 当作 A 类的 Sheet 特征时，官方《输出成果模板.xlsx》的
+# Sheet「A系统独有记录」就会命中，模板被当成 A 系统数据文件拖进配对流程。
+# 同理列名必须**精确相等**而不是子串包含 —— 模板的列名是「A系统-客户编码」，
+# 用子串匹配同样会误命中「客户编码」。
 SHEET_HINTS = {
-    ROLE_A: ("客户交易明细", "A系统", "客户明细", "ERP"),
-    ROLE_B: ("银行流水明细", "B系统", "银行流水", "流水明细"),
+    ROLE_A: ("客户交易明细",),
+    ROLE_B: ("银行流水明细",),
 }
 COLUMN_HINTS = {
     ROLE_A: ("客户名称", "客户编码"),
     ROLE_B: ("对方户名", "对方账号", "流水号"),
 }
 FILE_HINTS = {
-    ROLE_A: ("客户交易明细", "客户明细", "a系统", "_a", "-a", "erp", "客户"),
-    ROLE_B: ("银行流水", "流水明细", "b系统", "_b", "-b", "银行", "流水"),
+    ROLE_A: ("客户交易明细", "客户明细", "a系统", "_a", "-a", "erp"),
+    ROLE_B: ("银行流水", "流水明细", "b系统", "_b", "-b", "银行"),
 }
+
+# 明确不是数据源的文件名特征（官方模板、说明文档等），批量输入时直接跳过
+SKIP_NAME_HINTS = ("模板", "template", "成果", "示例", "说明")
 
 # 配对用的文件名噪声词（去掉后剩下的才是"这一批"的区分特征，通常是年份/期间）
 _NOISE_WORDS = (
@@ -124,11 +133,18 @@ def detect_role(path: Path | str) -> str | None:
     三级特征依次尝试，任一级命中即返回：
 
     1. **Sheet 名**（最可靠）—— 含「客户交易明细」→ A，含「银行流水明细」→ B
-    2. **列名** —— 含「客户名称 / 客户编码」→ A，含「对方户名 / 对方账号」→ B
-    3. **文件名** —— 含「客户 / a系统 / erp」→ A，含「银行 / 流水 / b系统」→ B
+    2. **列名**（**精确相等**，不做子串包含）—— 含「客户名称 / 客户编码」→ A，
+       含「对方户名 / 对方账号 / 流水号」→ B
+    3. **文件名** —— 含「客户交易明细 / a系统 / erp」→ A，含「银行流水 / b系统」→ B
+
+    文件名带「模板 / 成果 / 示例 / 说明」的直接返回 ``None`` —— 官方《输出成果模板》
+    这类参考件不是数据源，不该拖进配对流程。
     """
     path = Path(path)
     if not path.exists():
+        return None
+    lowered = path.stem.lower()
+    if any(h in lowered for h in SKIP_NAME_HINTS):
         return None
 
     # 1) Sheet 名
@@ -141,20 +157,19 @@ def detect_role(path: Path | str) -> str | None:
         if any(h in joined for h in hints):
             return role
 
-    # 2) 列名（只读表头，nrows=0 不加载数据）
+    # 2) 列名（精确相等，不做子串包含）
     try:
         head = pd.read_excel(path, sheet_name=0, nrows=0, engine="openpyxl")
-        cols = " ".join(str(c) for c in head.columns)
+        names = {str(c).strip() for c in head.columns}
     except Exception:                                   # noqa: BLE001
-        cols = ""
+        names = set()
     for role, hints in COLUMN_HINTS.items():
-        if any(h in cols for h in hints):
+        if any(h in names for h in hints):
             return role
 
     # 3) 文件名
-    name = path.stem.lower()
     for role, hints in FILE_HINTS.items():
-        if any(h in name for h in hints):
+        if any(h in lowered for h in hints):
             return role
     return None
 
@@ -205,26 +220,25 @@ def plan_jobs(paths: Sequence[Path | str]) -> list[Job]:
     if not files:
         raise ValueError("没有找到任何 Excel 文件（支持 .xlsx / .xlsm / .xls）")
 
-    a_files, b_files, unknown = [], [], []
+    a_files, b_files = [], []
     for f in files:
         role = detect_role(f)
-        (a_files if role == ROLE_A else b_files if role == ROLE_B else unknown).append(f)
+        if role == ROLE_A:
+            a_files.append(f)
+        elif role == ROLE_B:
+            b_files.append(f)
 
     if not a_files or not b_files:
         detail = "\n".join(
-            f"    · {f.name} → {'识别不出' if f in unknown else '已识别'}"
-            for f in files
+            f"    · {f.name} → {detect_role(f) or '识别不出'}" for f in files
         )
         raise ValueError(
             f"无法配对：识别到 A 系统文件 {len(a_files)} 个、B 系统文件 {len(b_files)} 个。\n"
-            f"  A 类特征：Sheet 名含「客户交易明细」，或列名含「客户名称/客户编码」\n"
-            f"  B 类特征：Sheet 名含「银行流水明细」，或列名含「对方户名/对方账号」\n"
+            "  A 类特征：Sheet 名含「客户交易明细」，或列名精确等于「客户名称/客户编码」\n"
+            "  B 类特征：Sheet 名含「银行流水明细」，或列名精确等于「对方户名/对方账号/流水号」\n"
+            "  文件名含「模板/成果/示例/说明」的会被跳过。\n"
             f"  已选文件：\n{detail}"
         )
-
-    if unknown:
-        # 单边文件足够多时，未识别的文件忽略即可；否则报错更安全
-        pass
 
     pairs: list[tuple[Path, Path]] = []
     if len(a_files) == 1:
@@ -280,6 +294,13 @@ def run_batch(
     total_jobs = len(jobs)
     out_dir = Path(out_dir) if out_dir else C.OUTPUT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    ignored = [f for f in expand_inputs(paths or [C.A_FILE, C.B_FILE])
+               if detect_role(f) is None]
+    if ignored:
+        names = "、".join(f.name for f in ignored[:5])
+        more = f" 等 {len(ignored)} 个" if len(ignored) > 5 else ""
+        log(f"[批量] 已忽略非数据源文件：{names}{more}")
 
     log(f"[批量] 共规划 {total_jobs} 个配对任务")
     for i, j in enumerate(jobs, start=1):

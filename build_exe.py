@@ -162,14 +162,14 @@ def stage_assets(target: Path, onefile: bool) -> None:
             "Topic03 多源运营数据模糊匹配工具\n"
             "=====================================\n\n"
             "1. 双击本目录下的 Topic03模糊匹配工具.exe 启动桌面程序。\n"
-            "2. 点「选择文件…」选 A/B 两个 Excel（可按住 Ctrl 多选），\n"
-            "   或点「选择文件夹…」直接选一个含多个 Excel 的目录做批量处理。\n"
+            "2. 分别点「A 系统」「B 系统」两行的「选择…」按钮，各选一个 Excel 文件。\n"
             "3. 需要换数据时，把新的 Excel 放进本目录的「团体赛赛道考题」文件夹，\n"
             "   或直接在界面里选择任意位置的文件，无需重新打包。\n"
             "4. 成果报表默认输出到本目录下的 output\\ 文件夹。\n\n"
-            "命令行用法（可选）：\n"
-            "  Topic03模糊匹配工具.exe --selftest            离屏自检\n"
-            "  python main.py                                 纯命令行全流程\n",
+            "命令行用法（可选，支持多文件批量）：\n"
+            "  Topic03模糊匹配工具.exe --selftest        离屏自检\n"
+            "  python main.py                             命令行全流程\n"
+            "  python main.py --batch --input <文件夹>    批量处理多个文件\n",
             encoding="utf-8",
         )
         print(f"  ✓ 已生成使用说明：{readme}")
