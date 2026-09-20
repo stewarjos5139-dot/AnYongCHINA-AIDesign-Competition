@@ -238,10 +238,18 @@ def build_b_only_table(
             continue
         seq += 1
         brow = df_b.iloc[j]
+        occupied = False
         if score.shape[0]:
             best_i = int(score[:, j].argmax())
             best_name = str(df_a.iloc[best_i][C.A_NAME_COL])
             best_score = float(score[best_i, j])
+            # 一对一约束：**本笔的候选分数已达标**，但那条 A 记录已被另一笔流水认领，
+            # 所以本笔用不上它。必须把这件事告诉审计师，否则「最高相似度 95% 却判独有」
+            # 与「候选相似度仍低于匹配阈值」的文案自相矛盾。
+            # 门槛必须同时卡住本笔分数 —— 否则 30 分级别的噪声候选也会命中，
+            # 把更有用的「无可信客户」文案顶掉。
+            cand = outcome.results[best_i]
+            occupied = bool(best_score >= thresholds.floor and cand.b_index != j)
         else:
             best_name, best_score = "", 0.0
         rows.append(
@@ -255,7 +263,7 @@ def build_b_only_table(
                 "摘要": brow.get("摘要", ""),
                 "最高相似度(%)": _fmt_score(best_score),
                 "A系统最佳候选": best_name,
-                "处理建议": _advice_b_only(best_score),
+                "处理建议": _advice_b_only(best_score, occupied=occupied),
             }
         )
     return pd.DataFrame(rows, columns=list(B_ONLY_COLUMNS))
@@ -267,8 +275,16 @@ B_ONLY_COLUMNS = (
 )
 
 
-def _advice_b_only(score: float) -> str:
-    """B 系统独有记录的处理建议。"""
+def _advice_b_only(score: float, occupied: bool = False) -> str:
+    """B 系统独有记录的处理建议。
+
+    ``occupied=True`` 表示这条记录的最佳 A 候选**分数已达匹配线，但那条 A 记录
+    已经被另一笔流水占走**（一对一约束下不可重复使用）。此时若照常输出
+    「候选相似度仍低于匹配阈值」，就与「最高相似度」列显示的 95% 自相矛盾 ——
+    必须点明是被占用，而不是分数不够。
+    """
+    if occupied:
+        return "最佳候选客户已被另一条流水匹配（一对一约束），本笔可能为重复入账，建议核对是否一对多"
     if score < 40:
         return "A系统无可信客户，可能为新客户，建议补充客户档案"
     if score < 55:
