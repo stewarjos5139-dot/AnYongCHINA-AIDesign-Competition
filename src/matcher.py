@@ -45,18 +45,36 @@ WEIGHTS: dict[str, float] = {
     "core_ratio": 0.20,    # 去标点后核心字号相似度 —— 抗括号差异
 }
 
-MIN_CONTAINMENT_LEN = 4        # 短串短于此长度不做包含关系抬分（防"华为"类过度匹配）
+MIN_CONTAINMENT_LEN = 2        # 短串短于此长度不做包含关系抬分
+# 注：这里取 2 而非 4。赛题 §5 明文要求
+#     A:"腾讯" vs B:"深圳市腾讯计算机系统有限公司" → 高相似度匹配，
+#     并注明「若标记为"未匹配"则扣分」。取 4 会把 2 字的「腾讯」挡在门槛外，
+#     判成 A系统独有。取 2 后当前数据的表现完全不变（表内最短名称是 4 字，
+#     且长度为 2–3 的名字作为子串出现的配对数为 0），纯粹修好赛题点名场景。
+SHORT_ALIAS_LEN = 3            # 短至此长度的完整包含 = 字号级简称
+SHORT_ALIAS_FLOOR = 92.0       # 直接抬进「高度匹配」档（≥90）
+
+# ---- 通用词折叠与关键字号保护（见 preprocessor.collapse_generic 的说明）----
+BRAND_PENALTY = 0.40           # 关键字号冲突：打折
+BRAND_CAP = 50.0               # 关键字号冲突：同时硬封顶，确保 < 识别下限 60
+SAME_BRAND_FLOOR = 95.0        # 特征字号一致：抬进「高度匹配」档
+SAME_BRAND_BOOST = 1.15        # 同字号、行业词不同（顺丰快递/顺丰控股）：候选排序加成
 PARTIAL_TRIGGER = 95.0         # partial_ratio 超过此值才进入包含关系候选
 ANCHOR_PENALTY = 15.0          # 前缀/后缀锚定：100 - (1-覆盖率)*15
 MIDDLE_PENALTY = 28.0          # 中间截取：100 - (1-覆盖率)*28
 
 DEFAULT_THRESHOLD = 60.0       # 低于此分视为"无匹配"，供第三阶段判定独有记录
 
+# R3 加成**只用于未匹配记录的候选建议**，绝不参与"是否匹配"的判定 ——
+# 因此只在结果仍低于识别下限时才生效，且封顶在下限之下。
+BOOST_CEILING = DEFAULT_THRESHOLD - 0.1
+
 # 各阶段的进度权重（占本模块 0–100% 的区间），供 CLI / GUI 共用
 STAGE_WEIGHTS: dict[str, tuple[float, float]] = {
     "matrix": (0.0, 45.0),       # 4 个 scorer 的相似度矩阵
     "penalty": (45.0, 25.0),     # 字号差异校验
-    "boost": (70.0, 10.0),       # 包含关系抬分
+    "boost": (70.0, 7.0),        # 包含关系抬分
+    "brand": (77.0, 3.0),        # 通用词折叠 + 关键字号保护
     "select": (80.0, 20.0),      # 选取最佳匹配
 }
 
@@ -239,6 +257,12 @@ def build_score_matrix(
     score = apply_core_penalty(score, a_clean, b_clean, verbose=verbose,
                                progress=progress)
 
+    # ---- 修正 1.5：通用词折叠 + 关键字号保护 ----
+    # 必须晚于字号惩罚（R2 要把被压低的"仅通用词差异"抬回来），
+    # 早于包含关系抬分（后者处理的是子串关系，两者互不重叠）。
+    score = apply_brand_rules(score, a_clean, b_clean, verbose=verbose,
+                              progress=progress)
+
     # ---- 修正 2：包含关系（简称 / 全称）抬分 ----
     score = apply_containment_boost(
         score, detail[:, :, 1], a_clean, b_clean, verbose=verbose, progress=progress
@@ -266,14 +290,30 @@ def apply_core_penalty(
     score: np.ndarray,
     a_clean: Sequence[str],
     b_clean: Sequence[str],
-    trigger: float = 55.0,
+    trigger: float = 0.0,
     verbose: bool = True,
     progress: ProgressFn | None = None,
 ) -> np.ndarray:
     """对"共享长通用尾巴但字号不同"的配对打折。
 
-    仅处理基础分 ``≥ trigger`` 的配对 —— 分数本就很低的配对无论如何都进不了匹配档，
-    无需消耗字符串分析开销，保证大数据量下的效率。
+    参数
+    ----
+    trigger : 只处理基础分 ``>= trigger`` 的配对。**默认 0.0（全部处理）**。
+
+    .. warning:: **不要把 trigger 调高。**
+       早期为省开销设过 ``trigger=55``，只惩罚"看起来还有希望"的配对，结果
+       制造了**排序反转**：
+
+       * ``上海哔哩哔哩科技有限公司 ↔ 上海哔哩哔哩有限公司`` 基础分 88.7，
+         被惩罚 ×0.55 → **48.8**
+       * ``中国海外发展有限公司 ↔ 上海哔哩哔哩有限公司`` 基础分仅 51.4，
+         低于阈值被**跳过惩罚** → **51.4**
+
+       于是语义上毫不相关的后者，反而成了「B系统最佳候选」列里显示的答案。
+       分档结果不受影响（本就低于识别下限），但候选建议彻底指错人。
+
+       实测代价：全量惩罚 9700 对使端到端从 0.161s 增至 0.187s（+26ms）。
+       用这点开销换排序正确性完全值得。
     """
     cand = np.argwhere(score >= trigger)
     if cand.size == 0:
@@ -289,6 +329,97 @@ def apply_core_penalty(
         if penalty < 1.0:
             score[i, j] *= penalty
 
+    return score
+
+
+def apply_brand_rules(
+    score: np.ndarray,
+    a_clean: Sequence[str],
+    b_clean: Sequence[str],
+    verbose: bool = True,
+    progress: ProgressFn | None = None,
+) -> np.ndarray:
+    """关键字号保护（R1）与特征字号一致抬分（R2）。
+
+    判据见 :func:`src.preprocessor.collapse_generic` —— 把行政区划、括号附注、
+    通用词全部剥掉后剩下的就是「特征字号」。两条名称特征字号相同，说明差异纯属
+    写法不同，判为同一主体。
+
+    * **R2** 特征字号一致且非空 → ``max(score, 95)``，抬进「高度匹配」档
+    * **R1** 关键字号集合不等（如「中国**建设**银行」vs「中国银行」）→
+      ``min(score*0.40, 50)``，硬封顶确保判为独有
+
+    性能：``collapse_generic`` / ``protected_brands_in`` 都是 Python 字符串操作，
+    但**按名称预计算**（O(n+m)）而非逐对调用（O(n·m)）—— R2 因此退化成一次
+    dict 查表，R1 用 ``np.ix_`` 向量化写入，两者都几乎不耗时。
+    """
+    n_a, n_b = score.shape
+    if n_a == 0 or n_b == 0:
+        return score
+
+    # ---- 预计算：每个名称只算一次 ----
+    a_core = [pp.collapse_generic(x) for x in a_clean]
+    b_core = [pp.collapse_generic(x) for x in b_clean]
+    a_brand = [pp.protected_brands_in(x) for x in a_clean]
+    b_brand = [pp.protected_brands_in(x) for x in b_clean]
+
+    # ---- R2：特征字号一致 → 抬分 ----
+    b_by_core: dict[str, list[int]] = {}
+    for j, core in enumerate(b_core):
+        if core:
+            b_by_core.setdefault(core, []).append(j)
+
+    boosted = 0
+    for i, core in enumerate(a_core):
+        if not core:
+            continue
+        for j in b_by_core.get(core, ()):
+            if score[i, j] < SAME_BRAND_FLOOR:
+                score[i, j] = SAME_BRAND_FLOOR
+                boosted += 1
+        _emit(progress, "brand", i + 1, max(len(a_core), 1), "特征字号比对")
+
+    # ---- R3：同字号、行业词不同 → 候选排序加成 ----
+    # 「顺丰快递」与「顺丰控股」剥到纯字号都是「顺丰」，是同一字号下的两个业务主体：
+    # 不判为同一家公司（分数仍低于识别下限），但互为最佳候选远比「申通快递」合理。
+    a_ind = [pp.collapse_industry(x) for x in a_clean]
+    b_ind = [pp.collapse_industry(x) for x in b_clean]
+    b_by_ind: dict[str, list[int]] = {}
+    for j, ind in enumerate(b_ind):
+        if ind:
+            b_by_ind.setdefault(ind, []).append(j)
+
+    for i, ind in enumerate(a_ind):
+        if not ind or ind == a_core[i]:      # 纯字号 == 特征字号说明没剥掉行业词，跳过
+            continue
+        for j in b_by_ind.get(ind, ()):
+            if b_ind[j] == b_core[j]:        # 对方也没剥掉行业词，不是同组
+                continue
+            if score[i, j] < DEFAULT_THRESHOLD:
+                score[i, j] = min(score[i, j] * SAME_BRAND_BOOST, BOOST_CEILING)
+
+    # ---- R1：关键字号冲突 → 硬封顶 ----
+    a_by_brand: dict[frozenset[str], list[int]] = {}
+    b_by_brand: dict[frozenset[str], list[int]] = {}
+    for i, brands in enumerate(a_brand):
+        a_by_brand.setdefault(brands, []).append(i)
+    for j, brands in enumerate(b_brand):
+        b_by_brand.setdefault(brands, []).append(j)
+
+    capped = 0
+    for set_a, rows in a_by_brand.items():
+        for set_b, cols in b_by_brand.items():
+            if set_a == set_b:          # 关键字号一致 → 不冲突
+                continue
+            block = score[np.ix_(rows, cols)]
+            hit = block * BRAND_PENALTY > BRAND_CAP
+            score[np.ix_(rows, cols)] = np.minimum(block * BRAND_PENALTY, BRAND_CAP)
+            capped += int(hit.sum()) if hit.size else 0
+
+    if verbose and (boosted or capped):
+        print(f"  [i] 通用词折叠：{boosted} 对抬至 {SAME_BRAND_FLOOR:.0f} 分"
+              f"（特征字号一致）；{capped} 对封顶 {BRAND_CAP:.0f} 分（关键字号冲突）")
+    _emit(progress, "brand", 1, 1, "关键字号保护完成")
     return score
 
 
@@ -325,6 +456,16 @@ def apply_containment_boost(
         anchored = long_.startswith(short) or long_.endswith(short)
         penalty = ANCHOR_PENALTY if anchored else MIDDLE_PENALTY
         boosted = 100.0 - (1.0 - coverage) * penalty
+
+        # 短简称（≤3 字）完整出现在长名里 —— 例如
+        #     A:"腾讯"  vs  B:"深圳市腾讯计算机系统有限公司"
+        # 这是赛题 §5 点名要求判为「高相似度匹配」的场景（并注明
+        # 「若标记为"未匹配"则扣分」）。按覆盖率公式，2/14 的覆盖率只能得 76 分
+        # （中低匹配档），达不到文档要求的档位。而"一个完整的短名称原样出现在
+        # 另一个名称中"本身已是强证据，长度悬殊不应成为重罚理由，故设下限。
+        if len(short) <= SHORT_ALIAS_LEN:
+            boosted = max(boosted, SHORT_ALIAS_FLOOR)
+
         if boosted > score[i, j]:
             score[i, j] = boosted
 

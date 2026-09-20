@@ -43,6 +43,9 @@ TAG_VOCAB: tuple[str, ...] = (
     # --- 主体层：差异 ---
     "疑似错别字",
     "字号不同",
+    "同一字号（通用词差异）",
+    "括号附注不同",
+    "关键字号冲突",
     "括号内信息不同",
     "含中英文字符",
     "数字不同",
@@ -162,6 +165,25 @@ def explain(
     core_a, core_b = pp.distinctive_core(clean_a, clean_b)
     penalty = pp.core_divergence_penalty(clean_a, clean_b)
     contained = False
+
+    # 关键字号冲突（如 中国**建设**银行 vs 中国银行）—— 最高优先级，
+    # 命中即说明是两家不同主体，后面不再谈"字号相同/不同"
+    if pp.brand_conflict(clean_a, clean_b):
+        only_a = pp.protected_brands_in(clean_a) - pp.protected_brands_in(clean_b)
+        only_b = pp.protected_brands_in(clean_b) - pp.protected_brands_in(clean_a)
+        detail = "、".join(sorted(only_a | only_b))
+        reasons.append(Reason("关键字号冲突", f"「{detail}」仅一方含有"))
+        return _with_runtime(reasons, result, thresholds)
+
+    # 通用词折叠后特征字号一致 —— 差异纯属行政区划 / 通用词 / 括号附注的写法不同。
+    # 必须**先于**「字号不同」判断，否则会给出"字号不同"这种与最终判定
+    # （高度匹配）自相矛盾的备注。
+    fold_a, fold_b = pp.collapse_generic(clean_a), pp.collapse_generic(clean_b)
+    if fold_a and fold_a == fold_b:
+        reasons.append(Reason("同一字号（通用词差异）", f"「{fold_a}」"))
+        if re.findall(r"\(([^)]*)\)", clean_a) != re.findall(r"\(([^)]*)\)", clean_b):
+            reasons.append(Reason("括号附注不同"))
+        return _with_runtime(reasons, result, thresholds)
 
     if clean_a in clean_b:
         contained = True

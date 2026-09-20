@@ -165,6 +165,162 @@ def core_name(value: object) -> str:
 
 
 # --------------------------------------------------------------------------- #
+#  通用词折叠 —— 判断两条名称的差异是否"纯属表述格式"
+# --------------------------------------------------------------------------- #
+# 中文企业名可拆成 ``[行政区划][特征字号][行业实词][组织类型]`` 四段。
+# 其中**只有「特征字号 + 行业实词」能标识主体**，行政区划与组织类型是
+# 任何公司都会带的"包装"。两条名称若把包装全部剥掉后仍然相同，说明它们
+# 之间的差异只是写法不同，应当判为同一主体。
+#
+# 归类原则（唯一的设计开关，增补时照此判断）：
+#   * 剥离 = 单独一个词不足以标识主体、且在大量公司名里反复出现
+#   * 保留 = 能单独区分主体的实词
+# 特别注意：「控股」「快递」「天然气」「化工」「医药」「地产」「汽车」
+# 「钢铁」等一律**不进**通用表 —— 它们正是用来区分主体的。
+# 「银行」「保险」进通用表，因为真正区分银行的是前置的字号
+# （建设 / 工商 / 农业…），该部分由 PROTECTED_BRANDS 单独保护。
+
+# 行政区划（前缀）
+REGION_WORDS: tuple[str, ...] = (
+    "中国", "中华", "北京", "上海", "天津", "重庆", "广州", "深圳", "广东",
+    "江苏", "浙江", "山东", "河南", "河北", "四川", "湖北", "湖南", "福建",
+    "安徽", "陕西", "辽宁", "江西", "云南", "广西", "山西", "内蒙古", "新疆",
+    "贵州", "甘肃", "海南", "宁夏", "青海", "西藏", "吉林", "黑龙江",
+    "香港", "澳门", "台湾", "苏州", "杭州", "南京", "武汉", "成都", "西安",
+    "青岛", "大连", "宁波", "厦门", "无锡", "佛山", "东莞", "郑州", "长沙",
+    "合肥", "福州", "济南", "沈阳", "哈尔滨",
+)
+
+# 通用词（后缀 / 泛行业词）
+GENERIC_WORDS: tuple[str, ...] = (
+    # 组织类型
+    "股份有限公司", "有限责任公司", "集团有限公司", "有限公司", "股份公司",
+    "集团", "公司", "事务所", "会计师事务所", "研究院", "研究所", "中心",
+    "合伙企业", "厂", "店",
+    # 泛行业词（不足以标识主体）
+    "科技", "网络", "信息", "技术", "服务", "咨询", "管理", "在线",
+    "计算机", "系统", "电子", "实业", "发展", "投资", "国际", "贸易",
+    "银行", "保险", "证券", "基金", "信托", "租赁", "石油",
+)
+
+# 关键字号保护清单：一方含、另一方不含 → 强惩罚，永不判为同一主体
+PROTECTED_BRANDS: tuple[str, ...] = (
+    "建设", "工商", "农业", "交通", "招商", "民生", "光大",
+    "平安", "浦发", "中信", "兴业", "华夏",
+)
+
+# 行业实词：与 GENERIC_WORDS 相反，这些词**能区分业务类型**，因而保留在特征字号里。
+# 但两组名称若剥到这个层次后字号仍然相同（如「顺丰快递」/「顺丰控股」都剩「顺丰」），
+# 说明它们是**同一字号下的不同业务主体** —— 不判为同一家公司，但互为最佳候选。
+INDUSTRY_TOKENS: tuple[str, ...] = (
+    "控股", "快递", "物流", "速递", "重工", "乳业", "制药", "新药开发",
+    "天然气", "化工", "医药", "地产", "置业", "能源", "汽车", "钢铁",
+    "水泥", "航空", "电力", "机械", "工程", "建筑", "环保", "通信",
+    "半导体", "新能源", "生物", "材料", "食品", "饮料", "传媒", "教育",
+    "旅游", "酒店", "农业", "证券", "基金", "信托", "租赁",
+)
+
+# 按长度降序，保证"股份有限公司"先于"有限公司"匹配
+_GENERIC_DESC: tuple[str, ...] = tuple(sorted(GENERIC_WORDS, key=len, reverse=True))
+_REGION_DESC: tuple[str, ...] = tuple(sorted(REGION_WORDS, key=len, reverse=True))
+_GENERIC_SET: frozenset[str] = frozenset(GENERIC_WORDS)
+_REGION_SET: frozenset[str] = frozenset(REGION_WORDS)
+_INDUSTRY_DESC: tuple[str, ...] = tuple(
+    sorted(INDUSTRY_TOKENS, key=len, reverse=True)
+)
+
+
+def collapse_generic(value: object) -> str:
+    """剥掉行政区划、括号附注、通用词后剩下的「特征字号」。
+
+    这是本模块最核心的判据 —— **两条名称折叠后相同，差异就纯属表述格式**。
+
+    >>> collapse_generic("上海哔哩哔哩科技有限公司")
+    '哔哩哔哩'
+    >>> collapse_generic("上海哔哩哔哩有限公司")
+    '哔哩哔哩'
+    >>> collapse_generic("中国建设银行股份有限公司")     # 保留「建设」
+    '建设'
+    >>> collapse_generic("中国银行股份有限公司")         # 剥完只剩空串
+    ''
+    >>> collapse_generic("顺丰控股股份有限公司")         # 「控股」是特征词，保留
+    '顺丰控股'
+
+    实现要点：**从尾部迭代剥后缀**，而不是对全文做 ``replace`` ——
+    盲替换会误伤字号本身（例如把「中国银行」里的「银行」连同别的词一起吃掉、
+    留下 ``（）`` 残渣），也无法处理"叠后缀"（``阿里巴巴网络技术有限公司``
+    需要连剥 ``有限公司`` → ``技术`` → ``网络``）。
+    """
+    text = strip_parens(clean_name(value))
+    if not text:
+        return ""
+
+    # 1) 反复剥尾部通用词，直到剥不动（支持叠后缀）
+    changed = True
+    while changed and text:
+        changed = False
+        for word in _GENERIC_DESC:
+            if text.endswith(word) and len(text) > len(word):
+                text = text[: len(text) - len(word)]
+                changed = True
+                break
+
+    # 2) 剩余物若本身就是通用词 / 行政区划（如「中国银行」剥完只剩「中国」），
+    #    说明这条名称**没有可标识主体的字号**，折叠结果视为空 ——
+    #    否则「中国银行」与「中国石油」都会折叠成「中国」而被误判为同一主体。
+    if text in _REGION_SET or text in _GENERIC_SET:
+        return ""
+    return text
+
+
+def collapse_industry(value: object) -> str:
+    """在 :func:`collapse_generic` 基础上**再剥掉尾部行业实词**，得到"纯字号"。
+
+    用于识别「同一字号下的不同业务主体」：
+
+    >>> collapse_industry("顺丰快递股份有限公司")
+    '顺丰'
+    >>> collapse_industry("顺丰控股股份有限公司")
+    '顺丰'
+    >>> collapse_industry("申通快递股份有限公司")   # 字号不同，不会与前两者同组
+    '申通'
+
+    末尾同样有"剩余物是通用词/行政区则视为空"的守卫 —— 否则
+    ``中国生物制药`` / ``中国建筑`` / ``中国农业银行`` 剥完都会只剩「中国」，
+    被凑成一组虚假的"同字号"。
+    """
+    text = collapse_generic(value)
+    if not text:
+        return ""
+    changed = True
+    while changed and text:
+        changed = False
+        for token in _INDUSTRY_DESC:
+            if text.endswith(token) and len(text) > len(token):
+                text = text[: len(text) - len(token)]
+                changed = True
+                break
+    if text in _REGION_SET or text in _GENERIC_SET:
+        return ""
+    return text
+
+
+def protected_brands_in(value: object) -> frozenset[str]:
+    """返回名称中含有的关键字号集合（供 :func:`brand_conflict` 比对）。"""
+    text = clean_name(value)
+    return frozenset(b for b in PROTECTED_BRANDS if b in text)
+
+
+def brand_conflict(name_a: object, name_b: object) -> bool:
+    """两侧的关键字号集合是否不等。
+
+    典型触发：「中国**建设**银行」含 ``建设``，而「中国银行」不含 ——
+    这是两家不同银行，必须拦下，哪怕它们共享 ``中国`` 前缀与 ``银行`` 后缀。
+    """
+    return protected_brands_in(name_a) != protected_brands_in(name_b)
+
+
+# --------------------------------------------------------------------------- #
 #  字号（distinctive core）分析 —— 抵抗"长通用尾巴"造成的误匹配
 # --------------------------------------------------------------------------- #
 def common_affix_len(s1: str, s2: str) -> tuple[int, int]:
@@ -249,6 +405,19 @@ def core_divergence_penalty(s1: str, s2: str) -> float:
     .. note:: 末行为纯后缀缺失，这里先压低；随后匹配引擎的"包含关系抬分"
        会把它重新抬回高度匹配档（简称 / 全称）。
     """
+    # ---- 前置豁免：差异**完全落在括号附注内** ----
+    # 赛题 §1.1 把「附加备注」列为需要模糊匹配解决的差异类型，其原始示例正是
+    #     安永华明会计师事务所（特殊普通合伙） vs 安永华明会计师事务所（北京分所）
+    # 这类配对的特征是：**剥掉括号后两条名称完全相同**，差异纯属附注。
+    # 若不做豁免，"（北京分所）"会被当成"纯插入 5 字"打成 ×0.40，把本该匹配的
+    # 一对压到 60 分以下误判为独有。而下方"取两视角较严值"的机制只会更严，
+    # 救不回来 —— 必须在这里显式放行。
+    #
+    # 注意与"真字号差异"的区别：中国石油天然气 vs 中国石油化工 不含括号，
+    # strip_parens 前后相同，因此**不受本豁免影响**，仍按字号差异重罚。
+    if strip_parens(s1) == strip_parens(s2):
+        return PENALTY_NONE
+
     return min(_penalty_one_view(s1, s2), _penalty_one_view(strip_parens(s1),
                                                             strip_parens(s2)))
 
