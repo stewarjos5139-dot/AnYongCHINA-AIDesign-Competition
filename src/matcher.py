@@ -59,6 +59,7 @@ BRAND_PENALTY = 0.40           # 关键字号冲突：打折
 BRAND_CAP = 50.0               # 关键字号冲突：同时硬封顶，确保 < 识别下限 60
 SAME_BRAND_FLOOR = 95.0        # 特征字号一致：抬进「高度匹配」档
 SAME_BRAND_BOOST = 1.15        # 同字号、行业词不同（顺丰快递/顺丰控股）：候选排序加成
+SCORE_PRECISION = 4            # 最终分数的舍入位数（消除浮点残差造成的阈值抖动）
 PARTIAL_TRIGGER = 95.0         # partial_ratio 超过此值才进入包含关系候选
 ANCHOR_PENALTY = 15.0          # 前缀/后缀锚定：100 - (1-覆盖率)*15
 MIDDLE_PENALTY = 28.0          # 中间截取：100 - (1-覆盖率)*28
@@ -152,8 +153,9 @@ class MatchResult:
     runner_up_name: str = ""
     runner_up_score: float = 0.0
     mutual_best: bool = False   # 该 B 记录是否也把本条 A 当作最优
-    conflict: bool = False      # 该 B 记录是否被其他 A 记录抢为首选
-    conflict_count: int = 1
+    conflict: bool = False      # 首选 B 被其他 A 记录争抢过（不必然让位）
+    conflict_count: int = 1     # 争抢其首选的 A 记录条数
+    displaced: bool = False     # 一对一约束下让位：首选被更高分记录拿走，改用次佳
 
     @property
     def is_matched(self) -> bool:
@@ -234,10 +236,11 @@ def build_score_matrix(
     }.items(), start=1):
         t = time.perf_counter()
         mats.append(
-            np.asarray(
-                process.cdist(left, right, scorer=scorer, workers=workers),
-                dtype=np.float64,
-            )
+            # dtype=np.float64 必须显式指定：rapidfuzz 默认返回 **float32**，
+            # 其 ~1e-5 的精度误差足以把恰好等于阈值（60.0）的分数压成
+            # 59.9999977，进而被误判为「独有」而不是「低置信度匹配」。
+            process.cdist(left, right, scorer=scorer, workers=workers,
+                          dtype=np.float64)
         )
         if verbose:
             print(f"    · {tag:<14} {n_a}×{n_b} 矩阵  {time.perf_counter() - t:.4f}s")
@@ -283,7 +286,9 @@ def build_score_matrix(
             if a == b:
                 score[i, j] = 100.0
 
-    return np.clip(score, 0.0, 100.0), detail
+    # 舍入到 4 位小数：float64 下仍可能出现 59.99999999999 这类残差，
+    # 恰好卡在阈值上时会造成分级抖动。4 位远细于任何展示需求，纯属消噪。
+    return np.round(np.clip(score, 0.0, 100.0), SCORE_PRECISION), detail
 
 
 def apply_core_penalty(
@@ -509,6 +514,32 @@ def _tie_break_indices(
 
 
 # --------------------------------------------------------------------------- #
+#  一对一分配
+# --------------------------------------------------------------------------- #
+def _resolve_one_to_one(score: np.ndarray, best_score: np.ndarray) -> np.ndarray:
+    """把「每条 A 各取最佳」的分配结果收敛成**一一对应**。
+
+    赛题 FAQ Q3 明确「默认一对一」，§2.4 的两侧算术（83+17=100、83+14=97）
+    也只有在一条 B 只能被一条 A 认领时才成立。
+
+    算法：按 A 的**最佳分降序**贪心 —— 分数高的 A 先挑走自己的首选，
+    分数低的若发现首选已被拿走，就退而取自己剩余候选里分数最高的那条。
+    这样同一条 B 只会落到一条 A 名下，且优先满足把握最大的配对。
+    """
+    n_a, n_b = score.shape
+    row_order = np.argsort(-score, axis=1)          # 每行候选按分数降序
+    taken = np.zeros(n_b, dtype=bool)
+    picked = np.full(n_a, -1, dtype=int)
+    for i in np.argsort(-best_score):               # 分数高的 A 优先
+        for j in row_order[i]:
+            if not taken[j]:
+                taken[j] = True
+                picked[i] = int(j)
+                break
+    return picked
+
+
+# --------------------------------------------------------------------------- #
 #  主匹配流程
 # --------------------------------------------------------------------------- #
 def match_tables(
@@ -581,19 +612,40 @@ def match_tables(
     # ---- 每条 B 的最佳 A（用于互为最优判定） ----
     b_best_a = np.argmax(score, axis=0)          # (nB,)
 
-    # ---- B 记录争抢情况（只统计达到匹配阈值的 A 记录） ----
-    b_taken: dict[int, list[int]] = {}
+    # ---- 一对一约束 ----
+    # 赛题 FAQ Q3「默认一对一」+ §2.4 的两侧算术都要求同一条 B 只能被一条 A 认领。
+    # 先记录"谁想要谁"（供报表说明让位原因），再按 A 的最佳分降序贪心分配。
+    wanted: dict[int, list[int]] = {}
     for i, j in enumerate(best_idx):
         if best_score[i] >= thresholds.floor:
+            wanted.setdefault(int(j), []).append(i)
+    for j in wanted:
+        wanted[j].sort(key=lambda ai: -score[ai, j])
+
+    # 只让"本来就能匹配上"（最佳分 ≥ 下限）的 A 参与分配 ——
+    # 分数不达标的 A 本来就不占任何 B，把它们卷进来只会污染 Sheet2 的
+    # 「最佳候选」展示（真实最优候选会被换成一条毫不相干的低分记录）。
+    final_idx = best_idx.copy()
+    matched = best_score >= thresholds.floor
+    if matched.any():
+        final_idx[matched] = _resolve_one_to_one(score[matched], best_score[matched])
+    final_score = score[np.arange(n_a), final_idx]
+    displaced = (final_idx != best_idx) & matched
+    if verbose and displaced.any():
+        print(f"  [i] 一对一约束：{int(displaced.sum())} 条 A 记录的首选 B 已被更高分"
+              f"记录认领，改用其他候选")
+
+    # 最终被认领的 B（每条至多一条 A）—— Sheet3「B系统独有」据此判定
+    b_taken: dict[int, list[int]] = {}
+    for i, j in enumerate(final_idx):
+        if final_score[i] >= thresholds.floor:
             b_taken.setdefault(int(j), []).append(i)
-    for j in b_taken:
-        b_taken[j].sort(key=lambda ai: -score[ai, j])
 
     results: list[MatchResult] = []
     for i in _iter(range(n_a), "  选取最佳匹配", "行", progress, "select",
                    "选取最佳匹配"):
-        j = int(best_idx[i])
-        rivals = b_taken.get(j, [])
+        j = int(final_idx[i])
+        rivals = wanted.get(int(best_idx[i]), [])   # 原本争抢其首选的那些 A
         results.append(
             MatchResult(
                 a_index=i,
@@ -602,7 +654,7 @@ def match_tables(
                 b_index=j,
                 b_name=b_raw[j],
                 b_clean=b_clean[j],
-                score=float(best_score[i]),
+                score=float(final_score[i]),
                 detail={
                     "ratio": float(detail[i, j, 0]),
                     "partial_ratio": float(detail[i, j, 1]),
@@ -613,8 +665,11 @@ def match_tables(
                 runner_up_name=b_raw[int(runner_idx[i])] if runner_idx[i] >= 0 else "",
                 runner_up_score=float(runner_score[i]),
                 mutual_best=bool(b_best_a[j] == i),
-                conflict=len(rivals) > 1,
+                # 一对一分配之后，"争抢"标记应跟随**让位方**而不是胜出方 ——
+                # 胜出的那条记录是正常匹配，标它"目标争抢"会误导审计师。
+                conflict=bool(displaced[i]),
                 conflict_count=max(1, len(rivals)),
+                displaced=bool(displaced[i]),
             )
         )
 
@@ -622,9 +677,12 @@ def match_tables(
         "n_a": n_a,
         "n_b": n_b,
         "pairs": int(n_a * n_b),
-        "exact_100": int(np.sum(np.round(best_score, 6) >= 100.0)),
-        "conflict_targets": sum(1 for v in b_taken.values() if len(v) > 1),
-        "conflict_rows": sum(len(v) - 1 for v in b_taken.values() if len(v) > 1),
+        "exact_100": int(np.sum(np.round(final_score, 6) >= 100.0)),
+        # 争抢发生在分配之前，用 wanted 统计；分配之后每条 B 至多一条 A
+        "conflict_targets": sum(1 for v in wanted.values() if len(v) > 1),
+        "conflict_rows": sum(len(v) - 1 for v in wanted.values() if len(v) > 1),
+        "displaced": int(displaced.sum()),
+        "b_claimed": len(b_taken),
         "mutual_best": sum(1 for r in results if r.mutual_best),
     }
     return MatchOutcome(results=results, score_matrix=score, b_taken=b_taken, stats=stats)

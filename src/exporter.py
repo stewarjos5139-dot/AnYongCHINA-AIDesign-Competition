@@ -70,7 +70,8 @@ _thin = Side(style="thin", color="BFBFBF")
 BORDER = Border(left=_thin, right=_thin, top=_thin, bottom=_thin)
 
 MONEY_FMT = "#,##0.00"
-SCORE_FMT = "0.0"
+SCORE_FMT = "0.0"      # Sheet1 相似度：赛题要求保留 1 位小数
+SCORE2_FMT = "0.00"    # 独有记录表：2 位小数，避免 59.96 被显示成 60.0
 PCT_FMT = "0.0%"
 
 # 列宽（沿用官方模板）
@@ -105,7 +106,18 @@ def _py(value: Any) -> Any:
 
 
 def _fmt_score(value: float) -> float:
+    """Sheet1 相似度：保留 1 位小数（赛题 §4.1 明文要求）。"""
     return round(float(value), 1)
+
+
+def _fmt_score2(value: float) -> float:
+    """独有记录表的「最高相似度」：保留 2 位小数。
+
+    这些表的候选分数**必然低于匹配下限**，用 1 位小数时 59.96 会被显示成
+    「60.0」，与同行的「候选相似度仍低于匹配阈值」文案看起来自相矛盾。
+    多留一位小数即可消除这种四舍五入造成的错觉。
+    """
+    return round(float(value), 2)
 
 
 # --------------------------------------------------------------------------- #
@@ -178,15 +190,24 @@ def build_a_only_table(
 ) -> pd.DataFrame:
     """Sheet2 —— B 系统中未找到达标匹配的 A 记录，附最高候选与处理建议。"""
     rows: list[dict[str, Any]] = []
+    score_matrix = outcome.score_matrix
     seq = 0
     for r in outcome.results:
         if r.score >= thresholds.floor:
             continue
         seq += 1
         arow = df_a.iloc[r.a_index]
-        best_j = r.b_index if r.b_index is not None else -1
-        best_name = r.b_name if best_j >= 0 else ""
-        best_score = r.score
+        # 真实最佳候选直接取相似度矩阵的**列最大值**，不能用 r.b_index ——
+        # 那是经一对一约束调整后的最终分配，会把这条记录的候选换成一条
+        # 毫不相干的低分记录，审计师就看不到"最像的那条"到底是什么了。
+        if score_matrix.shape[1]:
+            best_j = int(score_matrix[r.a_index].argmax())
+            best_name = str(df_b.iloc[best_j][C.B_NAME_COL])
+            best_score = float(score_matrix[r.a_index, best_j])
+        else:
+            best_j, best_name, best_score = -1, "", 0.0
+        # 该候选分数达标、却已被别的 A 记录认领（本记录必然未被认领）
+        occupied = bool(best_score >= thresholds.floor and best_j in outcome.b_taken)
         rows.append(
             {
                 "序号": seq,
@@ -196,9 +217,9 @@ def build_a_only_table(
                 C.DATE_COL: arow[C.DATE_COL],
                 "业务类型": arow.get("业务类型", ""),
                 "部门": arow.get("部门", ""),
-                "最高相似度(%)": _fmt_score(best_score),
+                "最高相似度(%)": _fmt_score2(best_score),
                 "B系统最佳候选": best_name,
-                "处理建议": _advice_a_only(best_score),
+                "处理建议": _advice_a_only(best_score, occupied=occupied),
             }
         )
     return pd.DataFrame(rows, columns=list(A_ONLY_COLUMNS))
@@ -210,8 +231,15 @@ A_ONLY_COLUMNS = (
 )
 
 
-def _advice_a_only(score: float) -> str:
-    """A 系统独有记录的复核建议（阈值 60 = 匹配地板分，低于它的候选均为噪声级）。"""
+def _advice_a_only(score: float, occupied: bool = False) -> str:
+    """A 系统独有记录的复核建议（阈值 60 = 匹配地板分，低于它的候选均为噪声级）。
+
+    ``occupied=True`` 表示最佳候选分数已达标，但那条 B 流水已被另一条 A 记录
+    认领（一对一约束）。此时若照常输出「候选相似度仍低于匹配阈值」，
+    就与「最高相似度」列的数值自相矛盾。
+    """
+    if occupied:
+        return "最佳候选流水已被另一条客户记录匹配（一对一约束），建议核对是否一对多"
     if score < 40:
         return "B系统无可信候选，建议核实是否为未达账项或单据缺失"
     if score < 55:
@@ -261,7 +289,7 @@ def build_b_only_table(
                 C.DATE_COL: brow[C.DATE_COL],
                 C.B_KEY_COL: brow.get(C.B_KEY_COL, ""),
                 "摘要": brow.get("摘要", ""),
-                "最高相似度(%)": _fmt_score(best_score),
+                "最高相似度(%)": _fmt_score2(best_score),
                 "A系统最佳候选": best_name,
                 "处理建议": _advice_b_only(best_score, occupied=occupied),
             }
@@ -349,6 +377,7 @@ def _write_table(
     *,
     money_cols: Iterable[str] = (),
     score_cols: Iterable[str] = (),
+    score_fmt: str = SCORE_FMT,
     center_cols: Iterable[str] = (),
     row_style: Callable[[dict[str, Any]], tuple[PatternFill | None,
                                                 Font | None]] | None = None,
@@ -379,7 +408,7 @@ def _write_table(
             if name in money_set:
                 cell.number_format, cell.alignment = MONEY_FMT, RIGHT
             elif name in score_set:
-                cell.number_format, cell.alignment = SCORE_FMT, CENTER
+                cell.number_format, cell.alignment = score_fmt, CENTER
             elif name in center_set:
                 cell.alignment = CENTER
             else:
@@ -455,6 +484,7 @@ def export_report(
     _write_table(
         ws2, sheet2, WIDTHS_A_ONLY,
         money_cols=("交易金额（元）",), score_cols=("最高相似度(%)",),
+        score_fmt=SCORE2_FMT,
         center_cols=("序号", "交易日期", "业务类型", "部门"),
         row_style=_unmatched_row_style,
     )
@@ -463,6 +493,7 @@ def export_report(
     _write_table(
         ws3, sheet3, WIDTHS_B_ONLY,
         money_cols=("交易金额（元）",), score_cols=("最高相似度(%)",),
+        score_fmt=SCORE2_FMT,
         center_cols=("序号", "交易日期", "摘要"),
         row_style=_unmatched_row_style,
     )

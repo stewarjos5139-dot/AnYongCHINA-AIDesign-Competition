@@ -52,7 +52,7 @@ TAG_VOCAB: tuple[str, ...] = (
     "长度差异",
     # --- 算法层 ---
     "非互为最优",
-    "目标争抢",
+    "已让位（首选被更高分记录认领）",
     "低置信度（建议逐条核实）",
 )
 
@@ -247,8 +247,8 @@ def _with_runtime(reasons: list[Reason], result: Any | None,
     """追加算法层标签。"""
     if result is None:
         return reasons
-    if getattr(result, "conflict", False):
-        reasons.append(Reason("目标争抢", f"被{result.conflict_count}条A记录同时选中"))
+    if getattr(result, "displaced", False) or getattr(result, "conflict", False):
+        reasons.append(Reason("已让位（首选被更高分记录认领）"))
     elif not getattr(result, "mutual_best", True):
         reasons.append(Reason("非互为最优", "建议复核"))
     # 仅对真正落在"低置信度匹配"档（floor ≤ score < low）的记录标注，

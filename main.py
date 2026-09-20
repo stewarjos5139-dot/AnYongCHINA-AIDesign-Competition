@@ -139,6 +139,8 @@ def print_match_summary(outcome: matcher.MatchOutcome, elapsed: float,
     print(f"  互为最优    : {st['mutual_best']} 条")
     print(f"  目标争抢    : {st['conflict_targets']} 条 B 记录被多条 A 同时选为最佳"
           f"（涉及 {st['conflict_rows']} 条 A 记录）")
+    print(f"  一对一让位  : {st.get('displaced', 0)} 条 A 记录的首选被更高分记录认领，"
+          f"已改用其他候选；最终认领 B 记录 {st.get('b_claimed', 0)} 条")
 
     counts = matcher.summarize(outcome.results, thresholds)
     total = sum(v for k, v in counts.items() if k != "A系统独有")
