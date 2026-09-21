@@ -127,14 +127,15 @@ def print_clean_effect(df: pd.DataFrame, name_col: str, n: int = 4) -> None:
 
 
 def print_match_summary(outcome: matcher.MatchOutcome, elapsed: float,
-                        thresholds: matcher.Thresholds = matcher.DEFAULT_THRESHOLDS) -> None:
+                        thresholds: matcher.Thresholds = matcher.DEFAULT_THRESHOLDS,
+                        algo: str = matcher.DEFAULT_ALGO) -> None:
     st = outcome.stats
     banner("阶段二 · 清洗与匹配引擎 运行结果")
     print(f"  比对规模    : A {st['n_a']} 行 × B {st['n_b']} 行 = {st['pairs']:,} 对")
     print(f"  耗时        : {elapsed:.2f} 秒")
-    print(f"  算法        : ratio×{matcher.WEIGHTS['ratio']} + partial×"
-          f"{matcher.WEIGHTS['partial_ratio']} + WRatio×{matcher.WEIGHTS['WRatio']} + "
-          f"core×{matcher.WEIGHTS['core_ratio']}，另加简称/全称包含关系修正")
+    print(f"  算法        : {matcher.describe_algo(algo)}")
+    print(f"                （另加字号差异惩罚、通用词折叠、关键字号保护、"
+          f"简称/全称包含关系修正 —— 换算法不换判据）")
     print(f"  相似度 100% : {st['exact_100']} 条")
     print(f"  互为最优    : {st['mutual_best']} 条")
     print(f"  目标争抢    : {st['conflict_targets']} 条 B 记录被多条 A 同时选为最佳"
@@ -196,9 +197,14 @@ def print_report_summary(report: dict) -> None:
         print(f"\n  Sheet1 匹配状态分布：")
         for k, v in s1["匹配状态"].value_counts().items():
             print(f"      {k:<12} {v:>4} 条")
-    print(f"\n  表头样式 : 加粗 / 居中 / 蓝底 004080 / 白字 / 微软雅黑 10pt")
+    # 表头配色 / 字号直接从 exporter 常量读，避免此处再写一份而悄悄脱节
+    fill = (exporter.HEADER_FILL.fgColor.rgb or "")[-6:]
+    print(f"\n  表头样式 : 加粗 / 居中 / 蓝底 {fill} / 白字 / "
+          f"微软雅黑 {exporter.HEADER_SIZE}pt"
+          f"（跟随官方模板；数据区 {exporter.BODY_SIZE}pt）")
     print(f"  条件格式 : 完全·高度匹配=浅绿底，中低匹配=浅黄底，独有未匹配=红色字体")
-    print(f"  其他     : 冻结首行 + 自动筛选 + 金额 #,##0.00 + 相似度 0.0 + 占比 0.0%")
+    print(f"  其他     : 冻结首行 + 自动筛选（4 个 Sheet）+ 金额 #,##0.00 + "
+          f"相似度 0.0 + 占比 0.0%")
 
 
 def print_conflicts(outcome: matcher.MatchOutcome, n: int = 3) -> None:
@@ -238,6 +244,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--out-dir", type=Path, default=None,
                         help=f"成果文件输出目录（默认 {config.OUTPUT_DIR}）")
     parser.add_argument("--no-export", action="store_true", help="只跑匹配，不导出 Excel")
+    parser.add_argument("-A", "--a-file", type=Path, default=None,
+                        help=f"A 系统数据文件（默认 {config.A_FILE}）")
+    parser.add_argument("-B", "--b-file", type=Path, default=None,
+                        help=f"B 系统数据文件（默认 {config.B_FILE}）")
 
     g = parser.add_argument_group("分档阈值（可调）")
     g.add_argument("--high", type=float, default=90.0,
@@ -246,6 +256,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="中低匹配分界线，默认 70（范围 50–80）")
     g.add_argument("--floor", type=float, default=60.0,
                    help="匹配识别下限，低于此分判为独有，默认 60")
+
+    a = parser.add_argument_group("相似度算法（§3.2 加分项）")
+    a.add_argument("--algo", choices=list(matcher.ALGO_CHOICES),
+                   default=matcher.DEFAULT_ALGO,
+                   help="基础相似度算法；默认 %(default)s = 多算法加权组合。"
+                        "其余为单算法对照模式，用于演示算法差异，"
+                        "业务规则（字号惩罚 / 通用词折叠 / 关键字号保护）在任何模式下都生效")
+    a.add_argument("--list-algo", action="store_true",
+                   help="列出全部可选算法后退出")
     return parser.parse_args(argv)
 
 
@@ -254,7 +273,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.no_progress:
         matcher.tqdm = None
 
+    if args.list_algo:
+        print("可选的相似度算法：")
+        for key in matcher.ALGO_CHOICES:
+            mark = "（默认）" if key == matcher.DEFAULT_ALGO else ""
+            print(f"  {key:<14} {matcher.describe_algo(key)}{mark}")
+        return 0
+
     print_versions()
+    print(f"  相似度算法  : {matcher.describe_algo(args.algo)}")
 
     thresholds = matcher.Thresholds(
         high=float(args.high), low=float(args.low), floor=float(args.floor)
@@ -266,7 +293,9 @@ def main(argv: list[str] | None = None) -> int:
     banner("阶段二 · 数据读取结果校验")
     t0 = time.perf_counter()
     try:
-        df_a, df_b = pipeline.load_and_clean(log=console_log)
+        df_a, df_b = pipeline.load_and_clean(
+            args.a_file, args.b_file, log=console_log
+        )
     except DataLoadError as exc:
         print(f"\n[读取失败] {exc}\n", file=sys.stderr)
         return 1
@@ -285,11 +314,12 @@ def main(argv: list[str] | None = None) -> int:
     # ---------------- 第二阶段：匹配 ----------------
     banner("第二阶段 · 匹配引擎")
     outcome = pipeline.run_match(
-        df_a, df_b, thresholds, workers=args.workers, log=console_log
+        df_a, df_b, thresholds, workers=args.workers, log=console_log,
+        algo=args.algo,
     )
     elapsed = time.perf_counter() - t0
 
-    print_match_summary(outcome, elapsed, thresholds)
+    print_match_summary(outcome, elapsed, thresholds, args.algo)
     print_conflicts(outcome)
     print_samples(matcher.sample_band(outcome.results, 70.0, 95.0, k=3))
 

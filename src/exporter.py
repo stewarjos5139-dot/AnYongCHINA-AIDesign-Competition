@@ -19,9 +19,9 @@ B系统独有记录         序号 / 对方户名 / 对方账号 / 交易金额�
 
 样式规范（对应评分表"成果输出规范性 25 分"）
 ----------------------------------------------
-* 表头：加粗 / 居中 / 蓝底 ``004080`` / 白字 / 微软雅黑 10pt
+* 表头：加粗 / 居中 / 蓝底 ``4472C4``（官方模板实测值）/ 白字 / 微软雅黑 11pt
 * 数据区：微软雅黑 10pt，细边框
-* 冻结首行 + 自动筛选
+* 冻结首行 + 自动筛选（4 个 Sheet 全部启用，Sheet4 冻结到表头行）
 * 金额字段：``#,##0.00``；相似度：``0.0``；占比：``0.0%``
 * 完全匹配 / 高度匹配 → 整行浅绿底；中低匹配 → 整行浅黄底；低置信度 / 未匹配 → 红色字体
 """
@@ -48,10 +48,13 @@ from . import preprocessor as pp
 #  样式常量
 # --------------------------------------------------------------------------- #
 FONT_NAME = "微软雅黑"
-BODY_SIZE = 10
+BODY_SIZE = 10          # §4.3「数据区：微软雅黑 10pt」
+HEADER_SIZE = 11        # 表头字号跟随官方模板（模板表头为 11pt，§4.3 只约束数据区）
 
-HEADER_FILL = PatternFill("solid", fgColor="004080")            # 深蓝底
-HEADER_FONT = Font(name=FONT_NAME, size=BODY_SIZE, bold=True, color="FFFFFF")
+# 表头配色取官方模板的实测值 4472C4（§4.3 只写"蓝色底白字"未给 RGB，
+# 但评分表"成果输出规范性 25 分"第 ① 条是"输出表格与官方模板一致"）。
+HEADER_FILL = PatternFill("solid", fgColor="4472C4")            # 官方模板蓝
+HEADER_FONT = Font(name=FONT_NAME, size=HEADER_SIZE, bold=True, color="FFFFFF")
 HEADER_ALIGN = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
 BODY_FONT = Font(name=FONT_NAME, size=BODY_SIZE)
@@ -63,7 +66,7 @@ GREEN_FILL = PatternFill("solid", fgColor="C6EFCE")             # 浅绿：完�
 YELLOW_FILL = PatternFill("solid", fgColor="FFEB9C")            # 浅黄：中低匹配
 RED_FONT = Font(name=FONT_NAME, size=BODY_SIZE, color="C00000")  # 红字：低置信度/未匹配
 TITLE_FONT = Font(name=FONT_NAME, size=14, bold=True, color="FFFFFF")
-TITLE_FILL = PatternFill("solid", fgColor="004080")
+TITLE_FILL = PatternFill("solid", fgColor="4472C4")   # 与表头同色，四表视觉统一
 NOTE_FONT = Font(name=FONT_NAME, size=9, italic=True, color="595959")
 
 _thin = Side(style="thin", color="BFBFBF")
@@ -120,6 +123,35 @@ def _fmt_score2(value: float) -> float:
     return round(float(value), 2)
 
 
+def _cell(row: pd.Series, col: str, default: Any = "") -> Any:
+    """安全取单元格值 —— 列不存在时返回 ``default``，不抛 ``KeyError``。
+
+    赛题只规定了"A 系统 / B 系统"两个工作簿的**必备列**，用户换一份自己的
+    数据时少一列（例如没有「业务类型」）是常态。原始实现用 ``arow[col]``
+    裸取，缺列直接 ``KeyError`` 冒到顶层，整条流水线崩掉 —— 命中评分表
+    "大数据量稳定性 15 分"的"无闪退、报错"项。缺列不该让导出失败。
+    """
+    if col not in row.index:
+        return default
+    value = row[col]
+    return default if _py(value) is None else value
+
+
+def _num(row: pd.Series, col: str) -> float:
+    """安全取数值：缺列 / 空值 / 非数字文本一律退化为 ``0.0``。
+
+    赛题 FAQ Q4 明确「金额不作为匹配依据」，所以读不出金额时退化为 0
+    不影响**任何匹配结论**，只影响展示 —— 但绝不该让整个导出崩掉。
+    """
+    raw = _cell(row, col, None)
+    if raw is None:
+        return 0.0
+    try:
+        return float(str(raw).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return 0.0
+
+
 # --------------------------------------------------------------------------- #
 #  Sheet 1：模糊匹配结果
 # --------------------------------------------------------------------------- #
@@ -140,12 +172,12 @@ def build_result_table(
             continue                        # 低于地板分 → 归入 Sheet2「A系统独有」
         seq += 1
         arow, brow = df_a.iloc[r.a_index], df_b.iloc[r.b_index]
-        amt_a = float(arow[C.A_AMOUNT_COL])
-        amt_b = float(brow[C.B_AMOUNT_COL])
+        amt_a = _num(arow, C.A_AMOUNT_COL)
+        amt_b = _num(brow, C.B_AMOUNT_COL)
         rows.append(
             {
                 "匹配序号": seq,
-                "A系统-客户编码": arow[C.A_KEY_COL],
+                "A系统-客户编码": _cell(arow, C.A_KEY_COL),
                 "A系统-客户名称": r.a_name,
                 "B系统-对方户名": r.b_name,
                 "相似度(%)": _fmt_score(r.score),
@@ -153,7 +185,7 @@ def build_result_table(
                 "A系统-交易金额": amt_a,
                 "B系统-交易金额": amt_b,
                 "金额差异": round(amt_a - amt_b, 2),
-                "交易日期": arow[C.DATE_COL],
+                "交易日期": _cell(arow, C.DATE_COL),
                 "备注": _remark(r, thresholds),
             }
         )
@@ -211,12 +243,12 @@ def build_a_only_table(
         rows.append(
             {
                 "序号": seq,
-                C.A_KEY_COL: arow[C.A_KEY_COL],
+                C.A_KEY_COL: _cell(arow, C.A_KEY_COL),
                 C.A_NAME_COL: r.a_name,
-                C.A_AMOUNT_COL: float(arow[C.A_AMOUNT_COL]),
-                C.DATE_COL: arow[C.DATE_COL],
-                "业务类型": arow.get("业务类型", ""),
-                "部门": arow.get("部门", ""),
+                C.A_AMOUNT_COL: _num(arow, C.A_AMOUNT_COL),
+                C.DATE_COL: _cell(arow, C.DATE_COL),
+                "业务类型": _cell(arow, "业务类型"),
+                "部门": _cell(arow, "部门"),
                 "最高相似度(%)": _fmt_score2(best_score),
                 "B系统最佳候选": best_name,
                 "处理建议": _advice_a_only(best_score, occupied=occupied),
@@ -277,18 +309,22 @@ def build_b_only_table(
             # 门槛必须同时卡住本笔分数 —— 否则 30 分级别的噪声候选也会命中，
             # 把更有用的「无可信客户」文案顶掉。
             cand = outcome.results[best_i]
-            occupied = bool(best_score >= thresholds.floor and cand.b_index != j)
+            occupied = bool(
+                best_score >= thresholds.floor
+                and cand.b_index is not None
+                and cand.b_index != j
+            )
         else:
             best_name, best_score = "", 0.0
         rows.append(
             {
                 "序号": seq,
-                C.B_NAME_COL: brow[C.B_NAME_COL],
-                C.B_ACCOUNT_COL: brow.get(C.B_ACCOUNT_COL, ""),
-                C.B_AMOUNT_COL: float(brow[C.B_AMOUNT_COL]),
-                C.DATE_COL: brow[C.DATE_COL],
-                C.B_KEY_COL: brow.get(C.B_KEY_COL, ""),
-                "摘要": brow.get("摘要", ""),
+                C.B_NAME_COL: _cell(brow, C.B_NAME_COL),
+                C.B_ACCOUNT_COL: _cell(brow, C.B_ACCOUNT_COL),
+                C.B_AMOUNT_COL: _num(brow, C.B_AMOUNT_COL),
+                C.DATE_COL: _cell(brow, C.DATE_COL),
+                C.B_KEY_COL: _cell(brow, C.B_KEY_COL),
+                "摘要": _cell(brow, "摘要"),
                 "最高相似度(%)": _fmt_score2(best_score),
                 "A系统最佳候选": best_name,
                 "处理建议": _advice_b_only(best_score, occupied=occupied),
@@ -341,19 +377,24 @@ def build_summary_rows(
     def pct(num: int, den: int) -> float:
         return round(num / den, 4) if den else 0.0
 
+    # 指标名**逐字对齐赛题 §4.1「Sheet 4：匹配统计汇总」的字段表**。
+    # 说明：
+    # * 阈值仍用 f-string 插值而非写死 90/70/60 —— 默认阈值下与 §4.1 一字不差，
+    #   用户在 GUI 上调过阈值后，标签会跟着变，不会出现"标 90 实际按 95 算"。
+    # * 「A系统独有记录」不带括号阈值：原先写「A系统独有（<60%）」，但同一工作簿
+    #   Sheet2 里存在最高相似度恰为 60.00 的记录（60 并不 < 60），标签与自家数据打架。
     return [
         ("A系统总记录数", n_a, 1.0),
         ("B系统总记录数", n_b, 1.0),
         ("完全匹配（100%）", counts["完全匹配"], pct(counts["完全匹配"], n_a)),
-        (f"高度匹配（{t.high:g}%–<100%）", counts["高度匹配"],
+        (f"高度匹配（≥{t.high:g}%）", counts["高度匹配"],
          pct(counts["高度匹配"], n_a)),
-        (f"中低匹配（{t.low:g}%–<{t.high:g}%）", counts["中低匹配"],
+        (f"中低匹配（{t.low:g}% ≤ score < {t.high:g}%）", counts["中低匹配"],
          pct(counts["中低匹配"], n_a)),
-        (f"低置信度匹配（{t.floor:g}%–<{t.low:g}%）", counts["低置信度匹配"],
+        (f"低置信度匹配（<{t.low:g}%）", counts["低置信度匹配"],
          pct(counts["低置信度匹配"], n_a)),
-        (f"A系统独有（<{t.floor:g}%）", counts["A系统独有"],
-         pct(counts["A系统独有"], n_a)),
-        ("B系统独有", len(sheet3), pct(len(sheet3), n_b)),
+        ("A系统独有记录", counts["A系统独有"], pct(counts["A系统独有"], n_a)),
+        ("B系统独有记录", len(sheet3), pct(len(sheet3), n_b)),
         ("总匹配成功数", matched, pct(matched, n_a)),
     ]
 
@@ -585,3 +626,8 @@ def _write_summary(ws: Worksheet, summary: list[tuple[str, int, float]],
 
     for i, w in enumerate(WIDTHS_SUMMARY, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
+    # §4.3「冻结首行，启用自动筛选」—— Sheet4 的表头在第 3 行（1 标题 / 2 空行），
+    # 所以冻结到 A4（锁住标题 + 表头），筛选区从表头行到最后一个指标行。
+    # 原先只设了列宽、漏了这两项，四个 Sheet 里唯独这张没有，属明确不合规。
+    ws.freeze_panes = "A4"
+    ws.auto_filter.ref = f"A3:{last_col}{3 + len(summary)}"

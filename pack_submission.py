@@ -31,6 +31,8 @@ Topic03_模糊匹配_张涵博.zip
 ├── 作品说明文档.md
 ├── 演示视频脚本指南.md
 ├── 提交说明.md
+├── docs/                       文档内嵌配图
+│   └── 匹配分布图.png           （作品说明文档 §5.2 引用）
 └── 文件清单.txt                 包内所有文件的路径 + 大小
 ```
 
@@ -39,6 +41,11 @@ Topic03_模糊匹配_张涵博.zip
 * **成果报表自动补生成**：归档前检查 ``output/`` 下有没有成果文件，没有就先跑一次
   ``main.py``，保证「提交的报表」与「当前代码」是同一版本产出的，不会出现
   文档描述与报表数字对不上的尴尬。
+* **exe 缺失直接中止**：``with_exe`` 时如果 ``dist/`` 下没有 exe，立刻报错退出，
+  不再"打一行 warning 继续打包"。宁可归档失败，也不产出一个少了免安装形态、
+  却显示「归档完成」的包。
+* **清单行数从报表读回**：``文件清单.txt`` 里各 Sheet 的行数由
+  :func:`sheet_row_counts` 直接读成果报表得出，不做硬编码，避免与报表脱节。
 * **exe 体积提示**：单文件 exe 约 80 MB 且已内部压缩，打进 zip 后几乎不再变小。
   ``--no-exe`` 可改用一份指向 ``dist/`` 的说明文件，把压缩包压到 100 KB 量级。
 * **排除清单显式声明**：虚拟环境、打包中间产物、缓存、IDE 配置一律不进包，
@@ -74,6 +81,9 @@ SOURCE_ROOT_FILES = (
 
 # 文档（放在压缩包根目录）
 DOC_FILES = ("作品说明文档.md", "演示视频脚本指南.md", "提交说明.md")
+
+# 文档内嵌图（作品说明文档 §5.2 引用了它；缺了文档里就是断图）
+DOC_ASSETS = ("docs/匹配分布图.png",)
 
 # 明确排除的目录：生成物、缓存、本机环境
 EXCLUDE_DIRS = (
@@ -146,6 +156,29 @@ def ensure_report(team: str, log=print) -> Path:
     return report
 
 
+def sheet_row_counts(xlsx: Path) -> dict[str, int]:
+    """从成果报表里读回各 Sheet 的**数据行数**（已扣掉表头行）。
+
+    清单里的行数必须这样读出来，不能写死 —— 写死的数字一旦与代码演进脱节，
+    评委打开清单看到的就和报表对不上，「文档与报表一致」这条直接失分。
+    读失败时返回空字典，调用方退化为不打印该行。
+    """
+    try:
+        import openpyxl
+
+        wb = openpyxl.load_workbook(xlsx, read_only=True)
+        try:
+            return {
+                sn: max(0, wb[sn].max_row - 1)
+                for sn in ("模糊匹配结果", "A系统独有记录", "B系统独有记录")
+                if sn in wb.sheetnames
+            }
+        finally:
+            wb.close()
+    except Exception:                       # noqa: BLE001 —— 清单不该让归档失败
+        return {}
+
+
 # --------------------------------------------------------------------------- #
 #  收集
 # --------------------------------------------------------------------------- #
@@ -171,6 +204,15 @@ def collect(team: str, with_exe: bool, log=print) -> Manifest:
     # ---- 可执行程序/ ----
     exe = DIST_DIR / f"{EXE_NAME}.exe"
     if with_exe:
+        # 缺 exe 必须**当场中止**，不能只打一行 warning 继续打包 ——
+        # 否则产出的 zip 看起来「归档完成 🎉」，实际却少了 §7.1 第一条
+        # 「可运行工具」的免安装形态，交付现场才发现就晚了。
+        if not exe.exists():
+            raise RuntimeError(
+                f"未找到可执行程序：{exe}\n"
+                f"    请先运行 build.bat / python build_exe.py 生成 dist/，\n"
+                f"    或显式加 --no-exe 改用指向 dist/ 的位置说明。"
+            )
         m.add(exe, f"可执行程序/{EXE_NAME}.exe", "可执行程序")
         for f in sorted((DIST_DIR / "团体赛赛道考题").glob("*")):
             if f.is_file():
@@ -195,12 +237,18 @@ def collect(team: str, with_exe: bool, log=print) -> Manifest:
     # ---- 文档 ----
     for name in DOC_FILES:
         m.add(BASE_DIR / name, name, "文档")
+    # 文档内嵌图必须一起打包，否则解压后《作品说明文档》里是断图
+    for rel in DOC_ASSETS:
+        m.add(BASE_DIR / rel, rel, "文档配图")
 
     return m
 
 
 def write_manifest(m: Manifest, team: str) -> Path:
-    """生成包内文件清单。"""
+    """生成包内文件清单。
+
+    成果报表的行数**从报表本体读回来**，不写死 —— 见 :func:`sheet_row_counts`。
+    """
     lines = [
         f"Topic03 多源运营数据模糊匹配工具 —— 提交包文件清单",
         f"参赛者：{team}    生成日期：{date.today():%Y-%m-%d}",
@@ -226,9 +274,23 @@ def write_manifest(m: Manifest, team: str) -> Path:
         "  方式二（源码）：   pip install -r 源码/requirements.txt",
         "                    然后 python 源码/gui_app.py",
         "",
-        "成果报表每 Sheet 行数：模糊匹配结果 83 / A系统独有 17 / B系统独有 14",
-        "（83 + 17 = 100 条 A 记录；83 + 14 = 97 条 B 记录，两侧账目对平）",
     ]
+
+    # 行数实事求是地从报表里读，读不到就整段略去（宁可不写，也不写错）
+    report = next((i.disk for i in m.items if i.tag == "成果报表"), None)
+    counts = sheet_row_counts(report) if report else {}
+    if {"模糊匹配结果", "A系统独有记录", "B系统独有记录"} <= counts.keys():
+        n_main = counts["模糊匹配结果"]
+        n_a = counts["A系统独有记录"]
+        n_b = counts["B系统独有记录"]
+        lines += [
+            f"成果报表「{report.name}」每 Sheet 数据行数：",
+            f"  模糊匹配结果 {n_main} / A系统独有记录 {n_a} / B系统独有记录 {n_b}",
+            f"  （{n_main} + {n_a} = {n_main + n_a} 条 A 记录；"
+            f"{n_main} + {n_b} = {n_main + n_b} 条 B 记录，两侧账目对平）",
+        ]
+    lines.append("")
+
     path = SUBMIT_DIR / "_文件清单.txt"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines), encoding="utf-8")

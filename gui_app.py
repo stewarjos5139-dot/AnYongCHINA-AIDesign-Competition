@@ -37,7 +37,7 @@ try:
     from PyQt6.QtCore import Qt, QThread, pyqtSignal
     from PyQt6.QtGui import QColor, QFont
     from PyQt6.QtWidgets import (
-        QApplication, QFileDialog, QFrame, QGridLayout, QGroupBox,
+        QApplication, QComboBox, QFileDialog, QFrame, QGridLayout, QGroupBox,
         QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
         QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter,
         QStatusBar, QTabWidget, QTableWidget, QTableWidgetItem, QTextEdit,
@@ -49,7 +49,7 @@ except ImportError:                                     # pragma: no cover
     from PyQt5.QtCore import Qt, QThread, pyqtSignal  # type: ignore
     from PyQt5.QtGui import QColor, QFont             # type: ignore
     from PyQt5.QtWidgets import (                     # type: ignore
-        QApplication, QFileDialog, QFrame, QGridLayout, QGroupBox,
+        QApplication, QComboBox, QFileDialog, QFrame, QGridLayout, QGroupBox,
         QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
         QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter,
         QStatusBar, QTabWidget, QTableWidget, QTableWidgetItem, QTextEdit,
@@ -357,6 +357,7 @@ class MatchWorker(QThread):
         thresholds: matcher.Thresholds,
         team: str,
         out_dir: str | None = None,
+        algo: str = matcher.DEFAULT_ALGO,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -365,6 +366,7 @@ class MatchWorker(QThread):
         self._thresholds = thresholds
         self._team = team
         self._out_dir = out_dir
+        self._algo = algo
 
     # 子线程体：绝不触碰任何界面元件
     def run(self) -> None:                              # noqa: D102
@@ -377,6 +379,7 @@ class MatchWorker(QThread):
                 out_dir=self._out_dir,
                 progress=lambda pct, msg: self.progress.emit(int(pct), msg),
                 log=lambda text: self.log.emit(text),
+                algo=self._algo,
             )
         except Exception as exc:                        # noqa: BLE001
             detail = "".join(
@@ -534,7 +537,7 @@ class ChartCanvas(FigureCanvasQTAgg):
 class MainWindow(QMainWindow):
     """参数配置 → 后台执行 → 结果可视化 → 导出 Excel。"""
 
-    PREVIEW_ROWS = 100          # 结果预览上限（考题数据 83 条可一次看全）
+    PREVIEW_ROWS = 100          # 结果预览上限（考题数据 85 条可一次看全）
 
     def __init__(self) -> None:
         super().__init__()
@@ -645,8 +648,36 @@ class MainWindow(QMainWindow):
         tg.addWidget(hint, 4, 0, 1, 2)
         lay.addWidget(thr_box)
 
+        # --- 算法（赛题 §3.2 加分项：多种相似度算法切换） ---
+        algo_box, ag = self._group("③ 相似度算法")
+        self.combo_algo = QComboBox()
+        for key in matcher.ALGO_CHOICES:
+            self.combo_algo.addItem(matcher.ALGO_LABELS[key], key)
+        self.combo_algo.setCurrentIndex(
+            list(matcher.ALGO_CHOICES).index(matcher.DEFAULT_ALGO)
+        )
+        self.combo_algo.setMinimumHeight(28)
+        ag.addWidget(self.combo_algo, 0, 0, 1, 2)
+
+        self.lbl_algo_desc = QLabel()
+        self.lbl_algo_desc.setObjectName("Hint")
+        self.lbl_algo_desc.setWordWrap(True)
+        ag.addWidget(self.lbl_algo_desc, 1, 0, 1, 2)
+
+        algo_hint = QLabel(
+            "「加权组合」为本工具主算法。切换算法只更换最底层的相似度计算；"
+            "字号差异惩罚、通用词折叠、关键字号保护等业务规则在任何模式下都生效。"
+        )
+        algo_hint.setObjectName("Hint")
+        algo_hint.setWordWrap(True)
+        ag.addWidget(algo_hint, 2, 0, 1, 2)
+
+        self.combo_algo.currentIndexChanged.connect(self._on_algo_changed)
+        self._on_algo_changed()
+        lay.addWidget(algo_box)
+
         # --- 执行 ---
-        run_box, rl = self._group("③ 执行")
+        run_box, rl = self._group("④ 执行")
         rl.setColumnStretch(0, 1)
         self.btn_run = QPushButton("▶  开始智能匹配")
         self.btn_run.setMinimumHeight(44)
@@ -796,6 +827,21 @@ class MainWindow(QMainWindow):
             floor=float(self.spin_floor.value()),
         )
 
+    def _algo(self) -> str:
+        """当前选定的基础相似度算法（§3.2 加分项）。"""
+        return self.combo_algo.currentData() or matcher.DEFAULT_ALGO
+
+    def _on_algo_changed(self) -> None:
+        """切换算法时刷新说明文字，并把选择写进日志。"""
+        algo = self._algo()
+        self.lbl_algo_desc.setText(matcher.describe_algo(algo))
+        self.combo_algo.setToolTip(
+            f"{matcher.ALGO_LABELS[algo]}\n{matcher.describe_algo(algo)}"
+        )
+        if hasattr(self, "log_box"):
+            self.log_box.append(f"[算法] 已选择：{matcher.describe_algo(algo)}")
+        self.statusBar().showMessage(f"相似度算法：{matcher.ALGO_LABELS[algo]}")
+
     # ================================================================= 执行
     def _start(self) -> None:
         if self._worker is not None and self._worker.isRunning():
@@ -829,7 +875,7 @@ class MainWindow(QMainWindow):
         self.btn_export.setEnabled(False)
 
         self._worker = MatchWorker(a_file, b_file, thresholds,
-                                   self._default_team, None, self)
+                                   self._default_team, None, self._algo(), self)
         self._worker.progress.connect(self._on_progress)
         self._worker.log.connect(self._on_log)
         self._worker.succeeded.connect(self._on_success)
@@ -1033,6 +1079,8 @@ def selftest() -> int:
     print(f"[selftest] 阈值控件：high={win.spin_high.value()} "
           f"low={win.spin_low.value()} floor={win.spin_floor.value()} "
           f"→ {win._thresholds().label}")
+    print(f"[selftest] 算法控件：{matcher.ALGO_LABELS[win._algo()]} "
+          f"（{win._algo()}）｜可选 {len(matcher.ALGO_CHOICES)} 种")
 
     # ---- 交互回归：把阈值改乱，再点「恢复默认阈值」应回到 90/70/60 ----
     win.spin_high.setValue(85)
@@ -1044,10 +1092,23 @@ def selftest() -> int:
           f" {'✓' if restored == (90, 70, 60) else '✗ 期望 (90, 70, 60)'}")
     assert restored == (90, 70, 60), "恢复默认阈值未生效"
 
+    # ---- 交互回归：算法下拉框每一项都能选中，且默认项就是主算法 ----
+    assert win._algo() == matcher.DEFAULT_ALGO, "算法下拉框默认值不是主算法"
+    picked = []
+    for idx, key in enumerate(matcher.ALGO_CHOICES):
+        win.combo_algo.setCurrentIndex(idx)
+        assert win._algo() == key, f"选中 {key} 后 _algo() 返回 {win._algo()}"
+        picked.append(win._algo())
+    win.combo_algo.setCurrentIndex(
+        list(matcher.ALGO_CHOICES).index(matcher.DEFAULT_ALGO)
+    )
+    print(f"[selftest] 算法下拉切换 → {picked} ✓")
+
     out_dir = C.OUTPUT_DIR / "_selftest"
     result = pipeline.run_pipeline(
         a_file=a_file, b_file=b_file, thresholds=win._thresholds(),
         out_dir=out_dir, log=lambda t: print(f"[selftest] {t}"),
+        algo=win._algo(),
     )
     win._apply_result(result)                          # 不弹模态框，便于离屏运行
     print(f"[selftest] 图表子图数：{len(win.chart.figure.axes)}")
@@ -1061,7 +1122,7 @@ def selftest() -> int:
 
     got: dict[str, object] = {"progress": [], "logs": 0, "ok": None, "err": None}
     worker = MatchWorker(a_file, b_file, win._thresholds(), C.DEFAULT_TEAM,
-                         str(out_dir))
+                         str(out_dir), win._algo())
     worker.progress.connect(lambda p, m: got["progress"].append(p))
     worker.log.connect(lambda t: got.__setitem__("logs", int(got["logs"]) + 1))
     worker.succeeded.connect(lambda r: got.__setitem__("ok", r))
@@ -1087,6 +1148,16 @@ def selftest() -> int:
     shot.parent.mkdir(parents=True, exist_ok=True)
     win.grab().save(str(shot))
     print(f"[selftest] 界面截图：{shot}")
+
+    # ---- 单独导出图表（供作品说明文档引用）----
+    # 说明：整窗截图走 Qt 离屏渲染，中文字体在无字体环境下会退化成方块；
+    # 而 matplotlib 图表用自带的字体配置渲染，中文始终正常。故文档配图
+    # 单独从 Figure 落盘，不走 grab()。
+    chart_png = out_dir / "gui_chart.png"
+    win.chart.figure.set_dpi(144)
+    win.chart.figure.savefig(str(chart_png), bbox_inches="tight",
+                             facecolor="white")
+    print(f"[selftest] 图表导出：{chart_png}")
 
     print("[selftest] 全部通过 ✅")
     return 0

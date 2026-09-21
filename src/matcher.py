@@ -45,6 +45,80 @@ WEIGHTS: dict[str, float] = {
     "core_ratio": 0.20,    # 去标点后核心字号相似度 —— 抗括号差异
 }
 
+# ---- 基础相似度算法注册表（赛题 §3.2 加分项：支持多种相似度算法切换）----
+#
+# 一个"算法"= 对若干基础 scorer 输出的一组权重。5 个 scorer 一次算完，
+# 换算法只是换一组权重，不重跑矩阵。
+#
+# 关键性质：``weighted``（默认）的权重与上方 :data:`WEIGHTS` **完全一致**，
+# 且 ``jaro_winkler`` 权重为 0（贡献恒为 0）—— 因此新增切换入口
+# **不改变**已验证的 45 / 40 / 15 / 12 匹配结果，纯粹是增量能力。
+SCORER_ORDER: tuple[str, ...] = (
+    "ratio", "partial_ratio", "WRatio", "core_ratio", "jaro_winkler",
+)
+#: 结果表「各算法原始分」默认报告这几个通道（保持既有输出不变）
+REPORTED_SCORERS: tuple[str, ...] = SCORER_ORDER[:4]
+
+SCORER_LABELS: dict[str, str] = {
+    "ratio": "Levenshtein 归一化编辑距离",
+    "partial_ratio": "最优子串相似度",
+    "WRatio": "rapidfuzz 自适应加权",
+    "core_ratio": "去标点后字号相似度",
+    "jaro_winkler": "Jaro-Winkler",
+}
+
+ALGO_WEIGHTS: dict[str, dict[str, float]] = {
+    # 默认：多算法加权组合（本工具主算法，抗错别字 / 长度差异 / 括号差异）
+    "weighted": {"ratio": 0.45, "partial_ratio": 0.20, "WRatio": 0.15,
+                 "core_ratio": 0.20},
+    # 以下为单算法对照模式：用于演示"换算法会怎样"，
+    # 它们**同样**会经过字号惩罚 / 通用词折叠 / 关键字号保护等全部业务规则。
+    "ratio": {"ratio": 1.0},
+    "partial_ratio": {"partial_ratio": 1.0},
+    "WRatio": {"WRatio": 1.0},
+    "core_ratio": {"core_ratio": 1.0},
+    "jaro_winkler": {"jaro_winkler": 1.0},
+}
+
+DEFAULT_ALGO = "weighted"
+ALGO_CHOICES: tuple[str, ...] = tuple(ALGO_WEIGHTS)
+
+ALGO_LABELS: dict[str, str] = {
+    "weighted": "加权组合（推荐）",
+    "ratio": "Levenshtein 编辑距离",
+    "partial_ratio": "最优子串相似度",
+    "WRatio": "rapidfuzz WRatio",
+    "core_ratio": "去标点字号比对",
+    "jaro_winkler": "Jaro-Winkler",
+}
+
+
+def describe_algo(algo: str = DEFAULT_ALGO) -> str:
+    """把算法名翻译成一行人类可读说明（供 CLI / GUI 日志打印）。"""
+    if algo not in ALGO_WEIGHTS:
+        raise ValueError(f"未知算法 {algo!r}，可选：{'、'.join(ALGO_CHOICES)}")
+    w = ALGO_WEIGHTS[algo]
+    if algo == DEFAULT_ALGO:
+        parts = " + ".join(
+            f"{tag}×{w[tag]:g}" for tag in SCORER_ORDER if w.get(tag)
+        )
+        return f"{parts}（多算法加权组合）"
+    return f"{ALGO_LABELS[algo]}（单算法对照模式）"
+
+
+def _jaro_winkler_ratio(s1: str, s2: str, score_cutoff: float | None = None) -> float:
+    """Jaro-Winkler 归一化相似度，缩放到 0–100。
+
+    ``rapidfuzz.process.cdist`` 要求自定义 scorer 接受 ``score_cutoff``
+    关键字参数，故显式声明。用惰性导入避免模块级硬依赖。
+    """
+    from rapidfuzz.distance import JaroWinkler
+
+    value = JaroWinkler.normalized_similarity(s1, s2) * 100.0
+    if score_cutoff is None:
+        return value
+    return value if value >= score_cutoff else 0.0
+
 MIN_CONTAINMENT_LEN = 2        # 短串短于此长度不做包含关系抬分
 # 注：这里取 2 而非 4。赛题 §5 明文要求
 #     A:"腾讯" vs B:"深圳市腾讯计算机系统有限公司" → 高相似度匹配，
@@ -156,10 +230,18 @@ class MatchResult:
     conflict: bool = False      # 首选 B 被其他 A 记录争抢过（不必然让位）
     conflict_count: int = 1     # 争抢其首选的 A 记录条数
     displaced: bool = False     # 一对一约束下让位：首选被更高分记录拿走，改用次佳
+    floor: float = DEFAULT_THRESHOLD   # 本次运行实际使用的识别下限（判定口径）
 
     @property
     def is_matched(self) -> bool:
-        return self.b_index is not None and self.score >= DEFAULT_THRESHOLD
+        """本条是否被接受为一次匹配。
+
+        .. note:: 判定口径必须用**本次运行实际使用的** ``floor``，
+            不能写死模块级常量 ``DEFAULT_THRESHOLD`` —— 用户在 GUI 上把
+            「识别下限」调成 30 之后，一条 45 分的记录确实匹配上了，
+            却会被写死 60 的属性判成未匹配，与报表分档自相矛盾。
+        """
+        return self.b_index is not None and self.score >= self.floor
 
 
 @dataclass
@@ -209,31 +291,51 @@ def build_score_matrix(
     workers: int = -1,
     verbose: bool = True,
     progress: ProgressFn | None = None,
+    algo: str = DEFAULT_ALGO,
 ) -> tuple[np.ndarray, np.ndarray]:
     """计算 A×B 全量相似度矩阵。
 
+    参数 ``algo`` 选定基础相似度算法（见 :data:`ALGO_WEIGHTS`）；无论选哪个，
+    之后的字号惩罚 / 通用词折叠 / 关键字号保护 / 包含关系抬分等**业务规则
+    全部照常生效** —— 换的只是最底层的相似度，不是判据。
+
     返回 ``(score, detail_stack)``：
     * ``score``        —— ``(len(a), len(b))`` 最终加权分 0–100
-    * ``detail_stack`` —— ``(len(a), len(b), 4)`` 各算法原始分，便于结果表追溯
+    * ``detail_stack`` —— ``(len(a), len(b), 5)`` 各 scorer 原始分（通道顺序
+      同 :data:`SCORER_ORDER`），便于结果表追溯
     """
+    if algo not in ALGO_WEIGHTS:
+        raise ValueError(
+            f"未知算法 {algo!r}，可选：{'、'.join(ALGO_CHOICES)}"
+        )
     a_clean = list(a_clean)
     b_clean = list(b_clean)
     n_a, n_b = len(a_clean), len(b_clean)
+    n_sc = len(SCORER_ORDER)
     if n_a == 0 or n_b == 0:
-        return np.zeros((n_a, n_b)), np.zeros((n_a, n_b, 4))
+        return np.zeros((n_a, n_b)), np.zeros((n_a, n_b, n_sc))
 
     a_core = list(a_core) if a_core is not None else [pp.strip_punct(x) for x in a_clean]
     b_core = list(b_core) if b_core is not None else [pp.strip_punct(x) for x in b_clean]
 
+    # 只算用得上的 scorer：当前算法有权重的 + 结果表要报告的分项。
+    # 默认 weighted 模式下 jaro_winkler 不被需要 → 跳过整次 cdist，
+    # 默认路径的耗时与加切换入口之前**完全一致**。
+    needed = {tag for tag, wt in ALGO_WEIGHTS[algo].items() if wt}
+    needed |= set(REPORTED_SCORERS)
+
     # rapidfuzz 的 cdist 一次只接受单个 scorer，故逐个调用；
     # 每个 scorer 内部由 C++ 多线程并行（workers=-1），n×m 全量矩阵毫秒级完成。
     mats: list[np.ndarray] = []
-    for k, (tag, (scorer, left, right)) in enumerate({
-        "ratio": (fuzz.ratio, a_clean, b_clean),
-        "partial_ratio": (fuzz.partial_ratio, a_clean, b_clean),
-        "WRatio": (fuzz.WRatio, a_clean, b_clean),
-        "core_ratio": (fuzz.ratio, a_core, b_core),
-    }.items(), start=1):
+    todo = [t for t in SCORER_ORDER if t in needed]
+    for k, tag in enumerate(todo, start=1):
+        scorer, left, right = {
+            "ratio": (fuzz.ratio, a_clean, b_clean),
+            "partial_ratio": (fuzz.partial_ratio, a_clean, b_clean),
+            "WRatio": (fuzz.WRatio, a_clean, b_clean),
+            "core_ratio": (fuzz.ratio, a_core, b_core),
+            "jaro_winkler": (_jaro_winkler_ratio, a_clean, b_clean),
+        }[tag]
         t = time.perf_counter()
         mats.append(
             # dtype=np.float64 必须显式指定：rapidfuzz 默认返回 **float32**，
@@ -244,16 +346,24 @@ def build_score_matrix(
         )
         if verbose:
             print(f"    · {tag:<14} {n_a}×{n_b} 矩阵  {time.perf_counter() - t:.4f}s")
-        _emit(progress, "matrix", k, 4, f"计算相似度矩阵 {k}/4（{tag}）")
+        _emit(progress, "matrix", k, len(todo),
+              f"计算相似度矩阵 {k}/{len(todo)}（{tag}）")
 
-    detail = np.stack(mats, axis=2)                         # (nA, nB, 4)
-
-    score = (
-        WEIGHTS["ratio"] * detail[:, :, 0]
-        + WEIGHTS["partial_ratio"] * detail[:, :, 1]
-        + WEIGHTS["WRatio"] * detail[:, :, 2]
-        + WEIGHTS["core_ratio"] * detail[:, :, 3]
+    # 未被计算的通道补零矩阵，保证通道索引与 SCORER_ORDER 恒定对齐
+    # （调用方按固定下标取 detail[:, :, 1] 等，不能因跳过计算而错位）
+    computed = dict(zip(todo, mats))
+    detail = np.stack(
+        [computed[t] if t in computed else np.zeros((n_a, n_b), dtype=np.float64)
+         for t in SCORER_ORDER],
+        axis=2,
     )
+
+    weights = ALGO_WEIGHTS[algo]
+    score = np.zeros((n_a, n_b), dtype=np.float64)
+    for idx, tag in enumerate(SCORER_ORDER):
+        w = weights.get(tag, 0.0)
+        if w:
+            score += w * detail[:, :, idx]
 
     # ---- 修正 1：字号（distinctive core）差异惩罚 ----
     # 必须先于"包含关系抬分"执行：简称/全称 会在此被压低，随后被包含了关系重新抬回。
@@ -525,6 +635,11 @@ def _resolve_one_to_one(score: np.ndarray, best_score: np.ndarray) -> np.ndarray
     算法：按 A 的**最佳分降序**贪心 —— 分数高的 A 先挑走自己的首选，
     分数低的若发现首选已被拿走，就退而取自己剩余候选里分数最高的那条。
     这样同一条 B 只会落到一条 A 名下，且优先满足把握最大的配对。
+
+    .. warning:: 返回值用 **-1 表示"抢不到 B"**（达标 A 的条数 > B 的总条数时
+        必然出现）。调用方**必须**显式处理 -1 —— numpy 接受负索引，
+        ``score[i, -1]`` / ``df_b.iloc[-1]`` 不会报错，只会静默取到最后一列 /
+        最后一行数据。见 :func:`match_tables` 中 ``ok = sub >= 0`` 一段。
     """
     n_a, n_b = score.shape
     row_order = np.argsort(-score, axis=1)          # 每行候选按分数降序
@@ -554,6 +669,7 @@ def match_tables(
     tie_break: bool = True,
     thresholds: Thresholds = DEFAULT_THRESHOLDS,
     progress: ProgressFn | None = None,
+    algo: str = DEFAULT_ALGO,
 ) -> MatchOutcome:
     """A × B 全量比对，返回每条 A 记录的最佳匹配。
 
@@ -563,6 +679,9 @@ def match_tables(
 
     ``thresholds`` 仅影响 ``b_taken``（哪些 B 记录算"被认领"）；分档标注在
     :meth:`Thresholds.bucket` / :func:`summarize` 中进行。
+
+    ``algo`` 选定基础相似度算法（:data:`ALGO_WEIGHTS`）。字号惩罚、通用词折叠、
+    关键字号保护、包含关系抬分等业务规则**与算法无关，照常生效**。
     """
     a_core_col = a_core_col or f"{a_col}{pp.CORE_SUFFIX}"
     b_core_col = b_core_col or f"{b_col}{pp.CORE_SUFFIX}"
@@ -583,12 +702,33 @@ def match_tables(
 
     score, detail = build_score_matrix(
         a_clean, b_clean, a_core, b_core, workers=workers, verbose=verbose,
-        progress=progress,
+        progress=progress, algo=algo,
     )
     n_a, n_b = score.shape
     if n_a == 0 or n_b == 0:
-        return MatchOutcome(results=[], score_matrix=score, b_taken={},
-                            stats={"n_a": n_a, "n_b": n_b})
+        # B 表为空（或 A 表为空）时，**每条 A 都应落入 Sheet2「A系统独有」**。
+        # 这里不能直接 return 空列表 —— build_result_table / build_a_only_table
+        # 都是遍历 outcome.results 出数据的，空列表会让整张表凭空消失：
+        # Sheet1/2/3 全空，Sheet4 却写着「A系统总记录数 = 1」，自相矛盾。
+        results = [
+            MatchResult(
+                a_index=i, a_name=a_raw[i], a_clean=a_clean[i],
+                b_index=None, b_name="", b_clean="", score=0.0,
+                detail={}, runner_up_index=None, runner_up_name="",
+                runner_up_score=0.0, mutual_best=False, conflict=False,
+                conflict_count=1, displaced=False,
+                floor=float(thresholds.floor),
+            )
+            for i in range(n_a)
+        ]
+        return MatchOutcome(
+            results=results, score_matrix=score, b_taken={},
+            stats={
+                "n_a": n_a, "n_b": n_b, "pairs": int(n_a * n_b),
+                "exact_100": 0, "conflict_targets": 0, "conflict_rows": 0,
+                "displaced": 0, "b_claimed": 0, "mutual_best": 0,
+            },
+        )
 
     # ---- 每条 A 的最佳 / 次佳 ----
     order = np.argsort(-score, axis=1)[:, :2]
@@ -628,8 +768,27 @@ def match_tables(
     final_idx = best_idx.copy()
     matched = best_score >= thresholds.floor
     if matched.any():
-        final_idx[matched] = _resolve_one_to_one(score[matched], best_score[matched])
-    final_score = score[np.arange(n_a), final_idx]
+        idx_m = np.flatnonzero(matched)
+        sub = _resolve_one_to_one(score[matched], best_score[matched])
+        ok = sub >= 0
+        final_idx[idx_m[ok]] = sub[ok]
+        # 让位后的分数必须**重算**：final_idx 已经变了，沿用分配前的
+        # best_score 会让"首选被抢走、退而取次优"的记录仍按首选分入档。
+        final_score = score[np.arange(n_a), final_idx]
+        if (~ok).any():
+            # 达标 A 的条数 > B 的总条数时，必然有 A 抢不到 B（_resolve_one_to_one
+            # 用 -1 表示）。按一对一约束，这些 A 本就该判为「A系统独有」。
+            #
+            # 但 -1 **绝不能留在 final_idx 里** —— 它是合法整数，numpy 会当成
+            # 负索引：score[i, -1] 取的是最后一列，df_b.iloc[-1] 取的是最后一行，
+            # 这条 A 就被静默配到 B 表最后一条流水上，金额 / 日期 / 户名全部张冠李戴，
+            # 而 b_taken 里还会混进非法键 -1。GUI 的「识别下限」可以往下调，
+            # 用户随手一滑就能触发。
+            final_idx[idx_m[~ok]] = best_idx[idx_m[~ok]]   # 先还原成自身最优，避免负索引
+            final_score[idx_m[~ok]] = 0.0                  # 压到下限之下 → 自动归入 Sheet2
+            matched[idx_m[~ok]] = False
+    else:
+        final_score = score[np.arange(n_a), final_idx]
     displaced = (final_idx != best_idx) & matched
     if verbose and displaced.any():
         print(f"  [i] 一对一约束：{int(displaced.sum())} 条 A 记录的首选 B 已被更高分"
@@ -656,10 +815,8 @@ def match_tables(
                 b_clean=b_clean[j],
                 score=float(final_score[i]),
                 detail={
-                    "ratio": float(detail[i, j, 0]),
-                    "partial_ratio": float(detail[i, j, 1]),
-                    "WRatio": float(detail[i, j, 2]),
-                    "core_ratio": float(detail[i, j, 3]),
+                    tag: float(detail[i, j, k])
+                    for k, tag in enumerate(SCORER_ORDER)
                 },
                 runner_up_index=int(runner_idx[i]) if runner_idx[i] >= 0 else None,
                 runner_up_name=b_raw[int(runner_idx[i])] if runner_idx[i] >= 0 else "",
@@ -670,6 +827,7 @@ def match_tables(
                 conflict=bool(displaced[i]),
                 conflict_count=max(1, len(rivals)),
                 displaced=bool(displaced[i]),
+                floor=float(thresholds.floor),
             )
         )
 

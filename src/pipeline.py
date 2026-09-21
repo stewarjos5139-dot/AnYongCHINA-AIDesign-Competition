@@ -132,11 +132,15 @@ def run_match(
     tie_break: bool = True,
     progress: ProgressFn = _noop_progress,
     log: LogFn = _noop_log,
+    algo: str = matcher.DEFAULT_ALGO,
 ) -> matcher.MatchOutcome:
     """执行相似度比对，进度回调会被换算到整体 10–85% 区间。
 
     调用方不关心进度（传入默认空回调，如 CLI 场景）时，进度条交还给 matcher 内部
     的 tqdm 处理，命令行观感与直接调用 matcher 完全一致。
+
+    ``algo`` 选定基础相似度算法（赛题 §3.2 加分项）。无论选哪个，
+    字号惩罚 / 通用词折叠 / 关键字号保护 / 包含关系抬分等规则均照常生效。
     """
     if progress is _noop_progress:
         inner = None
@@ -144,17 +148,14 @@ def run_match(
         def inner(pct: int, message: str) -> None:
             progress(_remap(pct, SPAN_MATCH), message)
 
-    log(f"[匹配] 算法：ratio×{matcher.WEIGHTS['ratio']} + "
-        f"partial×{matcher.WEIGHTS['partial_ratio']} + "
-        f"WRatio×{matcher.WEIGHTS['WRatio']} + "
-        f"core×{matcher.WEIGHTS['core_ratio']}，"
-        f"另加字号差异惩罚与简称/全称包含关系修正")
+    log(f"[匹配] 算法：{matcher.describe_algo(algo)}")
     log(f"[匹配] 阈值：{thresholds.label}（完全 / 高度 / 中低 / 识别下限）")
 
     outcome = matcher.match_tables(
         df_a, df_b, C.A_NAME_COL, C.B_NAME_COL,
         workers=workers, tie_break=tie_break,
         thresholds=thresholds, progress=inner, verbose=False,
+        algo=algo,
     )
     if inner is not None:
         progress(_remap(100, SPAN_MATCH), "相似度比对完成")
@@ -174,6 +175,7 @@ def run_pipeline(
     tie_break: bool = True,
     progress: ProgressFn = _noop_progress,
     log: LogFn = _noop_log,
+    algo: str = matcher.DEFAULT_ALGO,
 ) -> PipelineResult:
     """一次跑完 读取 → 清洗 → 匹配 → 导出。"""
     t0 = time.perf_counter()
@@ -186,7 +188,8 @@ def run_pipeline(
             f"数据表为空（A={len(df_a)} 行，B={len(df_b)} 行），无法比对"
         )
 
-    outcome = run_match(df_a, df_b, thresholds, workers, tie_break, progress, log)
+    outcome = run_match(df_a, df_b, thresholds, workers, tie_break, progress,
+                        log, algo)
     t_match = time.perf_counter()
 
     counts = matcher.summarize(outcome.results, thresholds)

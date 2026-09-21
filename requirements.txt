@@ -2,6 +2,10 @@
 # 安装：python -m pip install -r requirements.txt
 
 # ---- 核心计算（第一阶段起必需） ----
+# numpy 是 src/matcher.py 的**直接**运行时依赖（build_score_matrix 里用
+# np.argsort / np.round / np.clip / np.flatnonzero，不是仅类型注解）。
+# 虽然 pandas 会把它带进来，但显式声明才不会随 pandas 的依赖策略变化而断。
+numpy>=1.24
 pandas>=2.0
 openpyxl>=3.1
 rapidfuzz>=3.0

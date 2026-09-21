@@ -2,7 +2,7 @@
 
 清洗流水线（顺序不可调换）
 --------------------------
-1. 剔隐形字符：TAB/换行、NBSP、全角空格、零宽字符、BOM、C0 控制符
+1. 剔隐形字符：C0/C1 控制符、各类空格、`Cf` 格式控制符全类、TAG 字符等
 2. 全角 → 半角：括号 ``（）``→``()``，以及全部全角 ASCII(U+FF01–U+FF5E) 与常见中文标点
 3. 去空格：删除串内与首尾**所有**空格（中文企业名去空格最稳妥）
 4. 统一大小写：英文字母转大写
@@ -52,28 +52,79 @@ _EXTRA_PUNCT: dict[int, int] = {
 
 _TRANSLATE_TABLE: dict[int, int] = {**_FULLWIDTH_ASCII, **_EXTRA_PUNCT}
 
-# 不可见 / 格式控制字符的码点区间（含空格类、零宽类、控制类）
+# 不可见 / 格式控制字符的码点区间。
+#
+# 覆盖口径是**按 Unicode 类别穷举**，而不是凭印象挑几个最常见的：
+#
+# * ``Cc`` 控制符（C0 + C1）
+# * ``Zs`` / ``Zl`` / ``Zp`` 各类空格分隔符
+# * ``Cf`` 格式控制符 —— **全部**（软连字符、双向控制、TAG 字符…）
+# * 少数类别不属于 Cf 但渲染为空白、且在企业名里纯属噪声的字符
+#   （谚文填充符、变体选择符）
+#
+# 序号不可乱动：区间之间**不允许重叠**，也不允许跨 U+FFFF 边界
+# （见 :func:`_build_char_class` 的转义宽度选择）。
 _INVISIBLE_RANGES: tuple[tuple[int, int], ...] = (
+    # ---- Cc：C0 / C1 控制符 ----
+    (0x0000, 0x0008),   # NUL … BS
     (0x0009, 0x000D),   # TAB / LF / VT / FF / CR
-    (0x0000, 0x0008),   # C0 起始段
     (0x000E, 0x001F),   # C0 剩余段
-    (0x007F, 0x007F),   # DEL
+    (0x007F, 0x009F),   # DEL + C1 整段
+    # ---- Zs / Zl / Zp：各类空格分隔符 ----
     (0x00A0, 0x00A0),   # NBSP 不换行空格
     (0x1680, 0x1680),   # OGHAM SPACE MARK
-    (0x2000, 0x200F),   # EN QUAD … RLM（含 ZWSP / ZWNJ / ZWJ / LRM / RLM）
+    (0x2000, 0x200A),   # EN QUAD … HAIR SPACE
     (0x2028, 0x2029),   # LINE / PARAGRAPH SEPARATOR
     (0x202F, 0x202F),   # NARROW NBSP
     (0x205F, 0x205F),   # MEDIUM MATHEMATICAL SPACE
-    (0x2060, 0x2060),   # WORD JOINER
     (0x3000, 0x3000),   # IDEOGRAPHIC SPACE 全角空格
+    # ---- Cf：格式控制符（另见下方「不可见但非 Cf」组）----
+    (0x00AD, 0x00AD),   # SOFT HYPHEN 软连字符
+    (0x0600, 0x0605),   # 阿拉伯数字符号
+    (0x061C, 0x061C),   # ARABIC LETTER MARK
+    (0x06DD, 0x06DD),   # 阿拉伯文结束符
+    (0x070F, 0x070F),   # 叙利亚文缩写符
+    (0x0890, 0x0891),   # 阿拉伯文符号
+    (0x08E2, 0x08E2),   # 阿拉伯文分歧结束符
+    (0x180E, 0x180E),   # MONGOLIAN VOWEL SEPARATOR
+    (0x200B, 0x200F),   # ZWSP / ZWNJ / ZWJ / LRM / RLM
+    (0x202A, 0x202E),   # 双向嵌入 / 覆盖
+    (0x2060, 0x2064),   # WORD JOINER + 不可见运算符
+    (0x2066, 0x206F),   # 双向隔离符 + 数字形状
     (0xFEFF, 0xFEFF),   # BOM / ZWNBSP
+    (0xFFF9, 0xFFFB),   # 注释锚点
+    (0x110BD, 0x110BD), # KAITHI NUMBER SIGN
+    (0x110CD, 0x110CD), # KAITHI NUMBER SIGN ABOVE
+    (0x13430, 0x1343F), # 埃及圣书体格式控制符
+    (0x1BCA0, 0x1BCA3), # 速记格式控制符
+    (0x1D173, 0x1D17A), # 音乐符号
+    (0xE0001, 0xE0001), # LANGUAGE TAG
+    (0xE0020, 0xE007F), # TAG 字符（可用来隐藏任意文本）
+    # ---- 类别非 Cf，但同样不可见、在企业名里纯属噪声 ----
+    (0x115F, 0x1160),   # 谚文初声/中声填充符
+    (0x17B4, 0x17B5),   # 高棉语固有元音
+    (0x180B, 0x180D),   # 蒙古文自由变体选择符
+    (0x3164, 0x3164),   # 谚文填充符
+    (0xFE00, 0xFE0F),   # 变体选择符 VS1–VS16
+    (0xFFA0, 0xFFA0),   # 半角谚文填充符
+    (0xE0100, 0xE01EF), # 变体选择符补充区 VS17–VS256
 )
 
 
 def _build_char_class(ranges: tuple[tuple[int, int], ...]) -> str:
-    """把码点区间拼成 ``[\\u0009-\\u000d...]`` 形式的字符类文本。"""
+    """把码点区间拼成 ``[\\u0009-\\u000d...]`` 形式的字符类文本。
+
+    .. warning:: 转义宽度必须按码点大小选：``\\u`` 只吃**恰好 4 位**十六进制，
+        而 ``U+E0001``（TAG 字符）是 5 位 —— 若一律用 ``\\u`` 拼装，
+        ``\\ue0001`` 会被正则解析成 ``\\ue000`` **加上一个字面量字符** ``1``，
+        不可见字符清不掉，还会顺手把真正的数字 ``1`` 一起吃掉。
+        因此 U+FFFF 以上的码点一律用 ``\\U`` + 8 位。
+    """
+    def esc(cp: int) -> str:
+        return f"\\u{cp:04x}" if cp <= 0xFFFF else f"\\U{cp:08x}"
+
     parts = [
-        f"\\u{lo:04x}" if lo == hi else f"\\u{lo:04x}-\\u{hi:04x}"
+        esc(lo) if lo == hi else f"{esc(lo)}-{esc(hi)}"
         for lo, hi in ranges
     ]
     return "[" + "".join(parts) + "]"
@@ -130,10 +181,23 @@ def remove_spaces(text: str) -> str:
 def clean_name(value: object) -> str:
     """完整清洗流水线：隐形字符 → 全半角 → 去空格 → 大写。
 
-    ``None`` / ``NaN`` → 空串。原始字符串不做任何回写。
+    缺失值一律 → 空串。原始字符串不做任何回写。
+
+    .. note:: 缺失值判定必须走 :func:`pandas.isna` 而不是 ``isinstance(x, float)``
+        —— :func:`~src.data_loader.load_table` 会把名称列 ``astype("string")``，
+        空单元格是 ``pd.NA``（类型 ``NAType``），日期列缺失值是 ``pd.NaT``
+        （类型 ``NaTType``），两者都**不是** ``float``。只认 float 的话,
+        它们会掉进 ``str(value)``，空名称被清洗成字面量字符串 ``'<NA>'`` /
+        ``'NAT'`` —— 两条空记录于是互相判「完全匹配 100%」，正是赛题 §5
+        明文重罚的误匹配。
     """
-    if value is None or (isinstance(value, float) and pd.isna(value)):
+    if value is None:
         return ""
+    try:
+        if pd.isna(value):             # 一次覆盖 None / nan / pd.NA / pd.NaT
+            return ""
+    except (TypeError, ValueError):     # 非标量（数组 / 列表）→ 交给 str()
+        pass
     text = str(value)
     text = strip_invisible(text)   # 1 隐形字符
     text = to_halfwidth(text)      # 2 全角 → 半角（含括号）
