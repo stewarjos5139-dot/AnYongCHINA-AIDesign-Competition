@@ -12,7 +12,7 @@
 压缩包内部结构
 --------------
 ```
-Topic03_模糊匹配_张涵博.zip
+Topic03_模糊匹配_博星凌.zip
 ├── 源码/                       完整工程，解压即可运行（自包含）
 │   ├── src/                    8 个核心模块
 │   ├── main.py                 命令行入口
@@ -23,7 +23,7 @@ Topic03_模糊匹配_张涵博.zip
 │   ├── .gitignore
 │   └── 团体赛赛道考题/          数据目录（源码树自包含，解压即可跑）
 ├── 标准成果报表/                工具运行后自动生成的成果文件
-│   └── 模糊匹配结果_张涵博_<日期>.xlsx
+│   └── 模糊匹配结果_博星凌_<日期>.xlsx
 ├── 可执行程序/                  免安装运行
 │   ├── 多源运营数据相似度模糊匹配工具.exe
 │   ├── 团体赛赛道考题/          数据目录（可替换）
@@ -33,6 +33,8 @@ Topic03_模糊匹配_张涵博.zip
 ├── 提交说明.md
 ├── docs/                       文档内嵌配图
 │   └── 匹配分布图.png           （作品说明文档 §5.2 引用）
+├── 演示视频/                    赛题 §7.1 第 4 项必交材料
+│   └── 操作演示视频.mp4
 └── 文件清单.txt                 包内所有文件的路径 + 大小
 ```
 
@@ -41,6 +43,11 @@ Topic03_模糊匹配_张涵博.zip
 * **成果报表自动补生成**：归档前检查 ``output/`` 下有没有成果文件，没有就先跑一次
   ``main.py``，保证「提交的报表」与「当前代码」是同一版本产出的，不会出现
   文档描述与报表数字对不上的尴尬。
+* **演示视频必进包**：赛题 §7.1 第 4 项要求 3–5 分钟的操作演示视频，§7.2 要求所有材料
+  打进同一个 zip。脚本会按 :data:`VIDEO_CANDIDATES` 顺序自动定位视频，缺了会在
+  结尾的「跳过」清单里明确告警（不会静默漏交）。
+* **已压缩文件不二次压缩**：视频 / 图片 / zip 走 ``ZIP_STORED``，省掉对 100 MB+
+  文件做 DEFLATE 的无用开销。
 * **exe 缺失直接中止**：``with_exe`` 时如果 ``dist/`` 下没有 exe，立刻报错退出，
   不再"打一行 warning 继续打包"。宁可归档失败，也不产出一个少了免安装形态、
   却显示「归档完成」的包。
@@ -70,7 +77,7 @@ OUTPUT_DIR = BASE_DIR / "output"
 DIST_DIR = BASE_DIR / "dist"
 SUBMIT_DIR = BASE_DIR / "提交包"
 
-DEFAULT_TEAM = "张涵博"
+DEFAULT_TEAM = "博星凌"
 EXE_NAME = "多源运营数据相似度模糊匹配工具"
 
 # 源码包要收录的根级文件
@@ -84,6 +91,17 @@ DOC_FILES = ("作品说明文档.md", "演示视频脚本指南.md", "提交说�
 
 # 文档内嵌图（作品说明文档 §5.2 引用了它；缺了文档里就是断图）
 DOC_ASSETS = ("docs/匹配分布图.png",)
+
+# 操作演示视频（赛题 §7.1 第 4 项，必交材料）。
+# 按顺序取第一个存在的路径 —— 放在哪都行，不必强求某个固定位置。
+VIDEO_CANDIDATES = (
+    "演示视频/操作演示视频.mp4",
+    "提交包/操作演示视频.mp4",
+    "操作演示视频.mp4",
+)
+
+# 已压缩格式不再二次压缩：mp4 走 ZIP_STORED，省掉 143 MB 的无用 DEFLATE 运算
+_STORED_EXT = (".mp4", ".mov", ".mkv", ".avi", ".zip", ".gz", ".7z", ".png", ".jpg")
 
 # 明确排除的目录：生成物、缓存、本机环境
 EXCLUDE_DIRS = (
@@ -179,6 +197,15 @@ def sheet_row_counts(xlsx: Path) -> dict[str, int]:
         return {}
 
 
+def find_video() -> Path | None:
+    """定位操作演示视频（赛题 §7.1 第 4 项）。找不到返回 ``None``。"""
+    for rel in VIDEO_CANDIDATES:
+        p = BASE_DIR / rel
+        if p.is_file():
+            return p
+    return None
+
+
 # --------------------------------------------------------------------------- #
 #  收集
 # --------------------------------------------------------------------------- #
@@ -241,6 +268,17 @@ def collect(team: str, with_exe: bool, log=print) -> Manifest:
     for rel in DOC_ASSETS:
         m.add(BASE_DIR / rel, rel, "文档配图")
 
+    # ---- 演示视频/（赛题 §7.1 第 4 项，必交）----
+    # §7.2 要求所有材料打进同一个 zip，所以视频必须进包，不能只放在 zip 外面。
+    video = find_video()
+    if video is not None:
+        m.add(video, f"演示视频/{video.name}", "演示视频")
+    else:
+        m.skipped.append(
+            "演示视频/操作演示视频.mp4（赛题 §7.1 第 4 项必交材料，"
+            f"未找到源文件；可放到 {VIDEO_CANDIDATES[0]}）"
+        )
+
     return m
 
 
@@ -251,7 +289,7 @@ def write_manifest(m: Manifest, team: str) -> Path:
     """
     lines = [
         f"Topic03 多源运营数据模糊匹配工具 —— 提交包文件清单",
-        f"参赛者：{team}    生成日期：{date.today():%Y-%m-%d}",
+        f"参赛队：{team}    生成日期：{date.today():%Y-%m-%d}",
         "=" * 66,
         "",
     ]
@@ -307,7 +345,14 @@ def make_zip(m: Manifest, team: str, log=print) -> Path:
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED,
                          compresslevel=6, allowZip64=True) as zf:
         for item in m.items:
-            zf.write(item.disk, item.arc)
+            # 已压缩格式（mp4 / png / zip…）直接 STORED：DEFLATE 对它们
+            # 压不出几个字节，却要为 143 MB 的视频白烧几十秒 CPU。
+            stored = item.arc.lower().endswith(_STORED_EXT)
+            zf.write(
+                item.disk, item.arc,
+                compress_type=(zipfile.ZIP_STORED if stored
+                               else zipfile.ZIP_DEFLATED),
+            )
             log(f"    + {item.arc}")
     return zip_path
 
@@ -405,9 +450,11 @@ def main(argv: list[str] | None = None) -> int:
           f"压缩率 {ratio:.0f}%）")
     print(f"  文件数：{len(m.items)}")
 
-    if not args.no_exe and size_mb > 50:
-        print("\n  [提示] 压缩包较大主要来自内嵌的 exe。若赛事平台限制上传体积，")
-        print("         可用 --no-exe 重新生成（会附一份指向 dist/ 的位置说明）。")
+    if size_mb > 50:
+        contributor = "操作演示视频" if find_video() else "内嵌的 exe"
+        print(f"\n  [提示] 压缩包较大主要来自{contributor}（已压缩格式，zip 里不会再变小）。")
+        if not args.no_exe:
+            print("         若赛事平台限制上传体积，可用 --no-exe 去掉 exe 那部分。")
     return 0
 
 

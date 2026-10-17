@@ -18,16 +18,23 @@ import pandas as pd
 
 from . import config
 
-# 常见"隐形字符"白名单：用于控制台诊断打印
+# 常见“隐形字符”白名单：用于控制台诊断打印
+#
+# .. warning:: 键一律用 **转义序列** 写，不要直接嵌入字符本体。
+#     本表原先第 8 个键是直接写进去的 U+2028（LINE SEPARATOR），结果被编辑器
+#     保存时当作换行符剥掉，字典里只剩一个空字符串键 —— 而 ch 来自遍历字符串，
+#     永远不可能是空串，这条诊断标签就静默失效了。改成 \u2028 这种写法后，
+#     源码里只剩 ASCII，任何编辑器都动不了它。
 INVISIBLE_CHARS: dict[str, str] = {
-    " ": "NBSP 不换行空格",
-    "　": "IDEOGRAPHIC SPACE 全角空格",
-    "​": "ZERO WIDTH SPACE 零宽空格",
-    "﻿": "BOM / ZERO WIDTH NO-BREAK SPACE",
+    "\u0020": "NBSP 不换行空格",
+    "\u3000": "IDEOGRAPHIC SPACE 全角空格",
+    "\u200b": "ZERO WIDTH SPACE 零宽空格",
+    "\ufeff": "BOM / ZERO WIDTH NO-BREAK SPACE",
     "\t": "TAB 制表符",
     "\n": "LF 换行",
     "\r": "CR 回车",
-    " ": "LINE SEPARATOR",
+    "\u2028": "LINE SEPARATOR 行分隔符",
+    "\u2029": "PARAGRAPH SEPARATOR 段分隔符",
 }
 
 
