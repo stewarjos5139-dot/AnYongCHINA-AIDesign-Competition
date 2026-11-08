@@ -67,26 +67,26 @@ def _ensure_file(path: Path) -> None:
     if not path.is_file():
         raise DataLoadError(f"路径不是文件：{path}")
 
-
+#表头自动探测
 def _detect_header_row(
     path: Path, sheet: str, expected_cols: Iterable[str], max_scan: int = 10
-) -> tuple[int, int]:
+) -> tuple[int, int]:#表头在第几行，命中几个字段#只读前10行
     """在前 max_scan 行中找出与期望字段命中数最多的行，返回 (行号, 命中数)。"""
     probe = pd.read_excel(
         path, sheet_name=sheet, header=None, nrows=max_scan, dtype=object
     )
-    expected = set(expected_cols)
+    expected = set(expected_cols)#把期望字段转为集合
     best_row, best_hits = 0, -1
     for idx in range(len(probe)):
         cells = {
             _norm_header(v)
-            for v in probe.iloc[idx].tolist()
-            if not (v is None or (isinstance(v, float) and pd.isna(v)))
+            for v in probe.iloc[idx].tolist()#把第 idx 行的每个单元格值转成列表，再遍历每个单元格
+            if not (v is None or (isinstance(v, float) and pd.isna(v)))#过滤掉空单元格
         }
-        hits = len(expected & cells)
+        hits = len(expected & cells)#找集合交集
         if hits > best_hits:
             best_row, best_hits = idx, hits
-    return best_row, max(best_hits, 0)
+    return best_row, max(best_hits, 0)#兜底防止返回负数
 
 
 # --------------------------------------------------------------------------- #
@@ -109,7 +109,7 @@ def load_table(
     label           : 报错信息中的表名标识
     """
     path = Path(path)
-    _ensure_file(path)
+    _ensure_file(path)#确保文件存在
 
     available = list_sheets(path)
     if sheet not in available:
@@ -118,14 +118,16 @@ def load_table(
             f"    文件：{path}\n"
             f"    可选 Sheet：{available}"
         )
+    
+    #前置检查结束，开始读入数据
 
-    header_row, hits = _detect_header_row(path, sheet, expected_cols)
-    df = pd.read_excel(path, sheet_name=sheet, header=header_row, engine="openpyxl")
-    df.columns = [_norm_header(c) for c in df.columns]
+    header_row, hits = _detect_header_row(path, sheet, expected_cols)#找出表头在第几行
+    df = pd.read_excel(path, sheet_name=sheet, header=header_row, engine="openpyxl")#读取
+    df.columns = [_norm_header(c) for c in df.columns]#列表推导式，存入所有列名
 
     # 丢掉表头探测产生的空列 / 空行
-    df = df.loc[:, [c for c in df.columns if c != ""]]
-    df = df.dropna(how="all").reset_index(drop=True)
+    df = df.loc[:, [c for c in df.columns if c != ""]]#删掉空列
+    df = df.dropna(how="all").reset_index(drop=True)#删掉空行
 
     # 名称列：强制字符串 dtype，保留首尾空格与不可见字符
     if name_col:
@@ -184,7 +186,7 @@ def raw_names(df: pd.DataFrame, name_col: str) -> list[str]:
     """按行序取出名称列的原始字符串（NA → 空串），不做任何 strip。"""
     return ["" if pd.isna(v) else str(v) for v in df[name_col].tolist()]
 
-
+# 找出串里所有隐形字符，并记录它们的位置和身份 
 def unicode_report(text: str) -> dict[str, Any]:
     """给单条原始字符串做编码体检，供控制台对照打印。"""
     invisibles = [

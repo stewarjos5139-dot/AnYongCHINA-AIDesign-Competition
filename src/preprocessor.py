@@ -110,7 +110,7 @@ _INVISIBLE_RANGES: tuple[tuple[int, int], ...] = (
     (0xE0100, 0xE01EF), # 变体选择符补充区 VS17–VS256
 )
 
-
+#把区间拼成正则表达式公式
 def _build_char_class(ranges: tuple[tuple[int, int], ...]) -> str:
     """把码点区间拼成 ``[\\u0009-\\u000d...]`` 形式的字符类文本。
 
@@ -129,6 +129,9 @@ def _build_char_class(ranges: tuple[tuple[int, int], ...]) -> str:
     ]
     return "[" + "".join(parts) + "]"
 
+"""为什么不直接写正则表达式？
+原因：防止vscode等编辑器在保存时把不可见字符剥掉，
+导致源码里只剩空格、正则失效。"""
 
 _INVISIBLE_RE = re.compile(_build_char_class(_INVISIBLE_RANGES))
 
@@ -176,7 +179,7 @@ def upper_case(text: str) -> str:
 def remove_spaces(text: str) -> str:
     """删除串内与首尾全部空格。"""
     return strip_invisible(text).replace(" ", "")
-
+#上面的都是工具
 
 def clean_name(value: object) -> str:
     """完整清洗流水线：隐形字符 → 全半角 → 去空格 → 大写。
@@ -270,7 +273,7 @@ GENERIC_WORDS: tuple[str, ...] = (
 # 关键字号保护清单：一方含、另一方不含 → 强惩罚，永不判为同一主体
 PROTECTED_BRANDS: tuple[str, ...] = (
     "建设", "工商", "农业", "交通", "招商", "民生", "光大",
-    "平安", "浦发", "中信", "兴业", "华夏",
+    "平安", "浦发", "中信", "兴业", 
 )
 
 # 行业实词：与 GENERIC_WORDS 相反，这些词**能区分业务类型**，因而保留在特征字号里。
